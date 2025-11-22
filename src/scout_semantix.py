@@ -25,6 +25,7 @@ import math
 import threading
 import asyncio
 import base64
+import glob
 from io import BytesIO
 
 # Use Agg backend for matplotlib (headless rendering)
@@ -351,6 +352,45 @@ def choose_next_angle(robot_pos, current_heading):
 # PYBULLET ENV
 # ============================================================================
 
+def load_stl_mesh(stl_path, position=[0, 0, 0], orientation=[0, 0, 0, 1], scale=1.0, mass=0.0):
+    """
+    Load an STL file as a mesh in PyBullet.
+    
+    Args:
+        stl_path: Path to the STL file (relative or absolute)
+        position: [x, y, z] position in world coordinates
+        orientation: [x, y, z, w] quaternion orientation (default: no rotation)
+        scale: Scaling factor for the mesh (default: 1.0)
+        mass: Mass of the object (0.0 = static/kinematic, >0 = dynamic)
+    
+    Returns:
+        body_id: PyBullet body ID of the loaded mesh
+    """
+    # Create collision shape from STL
+    collision_shape = p.createCollisionShape(
+        shapeType=p.GEOM_MESH,
+        fileName=stl_path,
+        meshScale=[scale, scale, scale]
+    )
+    
+    # Create visual shape from STL (for rendering)
+    visual_shape = p.createVisualShape(
+        shapeType=p.GEOM_MESH,
+        fileName=stl_path,
+        meshScale=[scale, scale, scale]
+    )
+    
+    # Create multi-body from the shapes
+    body_id = p.createMultiBody(
+        baseMass=mass,
+        baseCollisionShapeIndex=collision_shape,
+        baseVisualShapeIndex=visual_shape,
+        basePosition=position,
+        baseOrientation=orientation
+    )
+    
+    return body_id
+
 def setup_env():
     print("[SETUP] Connecting to PyBullet GUI...")
     p.connect(p.GUI)
@@ -403,6 +443,62 @@ def setup_env():
     print("[SETUP] Spawning Panopticon Agent (Fixed Base)...")
     robot_id = p.loadURDF("r2d2.urdf", [0, 0, 0.5], useFixedBase=True)
     print(f"[SETUP] Robot ID: {robot_id} (Fixed at origin)")
+
+    # === STL MESHES - Load all STL files around the robot ===
+    # Find all STL files in current directory and assets folder
+    stl_files = []
+    
+    # Check current directory
+    stl_files.extend(glob.glob("*.stl"))
+    stl_files.extend(glob.glob("*.STL"))
+    
+    # Check parent directory (project root)
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    stl_files.extend(glob.glob(os.path.join(parent_dir, "*.stl")))
+    stl_files.extend(glob.glob(os.path.join(parent_dir, "*.STL")))
+    
+    # Check assets folder
+    assets_dir = os.path.join(parent_dir, "assets")
+    if os.path.exists(assets_dir):
+        stl_files.extend(glob.glob(os.path.join(assets_dir, "*.stl")))
+        stl_files.extend(glob.glob(os.path.join(assets_dir, "*.STL")))
+    
+    # Remove duplicates
+    stl_files = list(set(stl_files))
+    
+    if stl_files:
+        print(f"[SETUP] Found {len(stl_files)} STL file(s): {', '.join([os.path.basename(f) for f in stl_files])}")
+        
+        # Robot position
+        robot_pos = [0, 0, 0.5]
+        radius = 12.5  # Distance from robot center
+        z_height = 0.5  # Height above ground
+        stl_scale = 0.0007  # Scale factor for all STL files
+        
+        # Arrange STL files in a circle around the robot
+        num_files = len(stl_files)
+        for i, stl_file in enumerate(stl_files):
+            # Calculate angle for circular arrangement
+            angle = (2 * math.pi * i) / num_files
+            
+            # Calculate position around robot
+            x = robot_pos[0] + radius * math.cos(angle)
+            y = robot_pos[1] + radius * math.sin(angle)
+            z = z_height
+            
+            try:
+                # Load with scale 0.07
+                mesh_id = load_stl_mesh(
+                    stl_path=stl_file,
+                    position=[x, y, z],
+                    scale=stl_scale,
+                    mass=0.0  # Static objects
+                )
+                print(f"  ✓ Loaded {os.path.basename(stl_file)} at position [{x:.2f}, {y:.2f}, {z:.2f}] with scale {stl_scale}")
+            except Exception as e:
+                print(f"  ✗ Warning: Could not load {os.path.basename(stl_file)}: {e}")
+    else:
+        print("[SETUP] No STL files found")
 
     return robot_id
 
