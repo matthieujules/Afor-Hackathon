@@ -162,11 +162,14 @@ This is the core innovation. When vision analysis detects off-screen continuity:
 ```python
 variance = torch.var(patch_tokens, dim=1).mean().item()
 
-if variance < 0.008:     interest_score = 0.1  # Blank wall
-elif variance > 0.03:    interest_score = 1.0  # High clutter
+# Empirically calibrated for PyBullet renders:
+if variance < 2.95:      interest_score = 0.1  # Empty walls
+elif variance > 3.05:    interest_score = 1.0  # High clutter
 else:                    # Linear interpolation
-    interest_score = (variance - 0.008) / (0.03 - 0.008)
+    interest_score = (variance - 2.95) / (3.05 - 2.95)
 ```
+
+**Note:** PyBullet renders have much higher variance (~2.9-3.1) than simple test images (~0.008-0.03).
 
 **Lead Direction Detection:**
 ```python
@@ -196,17 +199,22 @@ if left_edge > center*1.15 AND left_edge > right_edge*1.2:
 
 **Differences from DINOv2:**
 - Improved training (released August 2025)
-- Different variance ranges: blank wall ~0.005-0.012, clutter >0.045
+- **Lower variance** than DINOv2: empty ~0.027, clutter ~0.030
 - Register tokens (4) that act as memory slots
 - Loaded via `AutoModel.from_pretrained()` instead of torch.hub
 
-**Thresholds recalibrated:**
+**Thresholds recalibrated for PyBullet:**
 ```python
-if variance < 0.012:     interest_score = 0.1
-elif variance > 0.045:   interest_score = 1.0
+# Empirically calibrated from actual PyBullet renders:
+if variance < 0.028:     interest_score = 0.1  # Empty walls
+elif variance > 0.031:   interest_score = 1.0  # High clutter
 else:  # Linear interpolation
-    interest_score = (variance - 0.012) / (0.045 - 0.012)
+    interest_score = (variance - 0.028) / (0.031 - 0.028)
 ```
+
+**Observed values:**
+- Empty wall: 0.0274
+- Ducks visible: 0.0303 → Interest: 0.77
 
 ### Fallback Mode
 
@@ -220,14 +228,23 @@ interest_score = min(max(edge_energy.mean() / 25.0, 0.1), 1.0)
 
 ## PyBullet Environment
 
-Setup: `scout_semantix.py:232-261`
+Setup: `scout_semantix.py:237-278`
 
 **Elements:**
 - Plane ground
-- 4 walls forming 20m × 20m enclosure
-- **Interesting Zone (Right)**: 5 boxes + 5 ducks creating visual trail
-- **Boring Zone (Left)**: Empty
+- 4 walls (10m cubes at z=5) forming 20m × 20m enclosure
+  - East wall: [10, 0, 5]
+  - West wall: [-10, 0, 5]
+  - North/South walls: [0, ±10, 5]
+- **Interesting Zone (East)**:
+  - 5 boxes at X: 4-8m, Y: -2 to +1.2m, Z: 0.5m
+  - 5 ducks at X: 1-5m, Y: -1 to +0.2m, Z: 0.5m (duck trail)
+- **Boring Zone (West)**: Empty
 - **Robot**: R2D2 URDF at [0,0,0.5], rotates on yaw axis only
+
+**Expected observations:**
+- 0° (East): Should see ducks → variance ~0.030 (DINOv3) or ~3.0 (DINOv2)
+- 180° (West): Empty wall → variance ~0.027 (DINOv3) or ~2.9 (DINOv2)
 
 **Camera:** `scout_semantix.py:263-278`
 - Position: Robot head at z=0.8m
@@ -268,6 +285,17 @@ Then in `scout_semantix.py`:
 from vision_alternatives import MyVisionClient
 vlm_client = MyVisionClient()
 ```
+
+## Error Handling & Robustness
+
+**Implemented safeguards (scout_semantix.py:327-332, 399-409):**
+
+1. **Vision analysis wrapper**: try/except around `analyze_scene()` continues simulation with safe defaults if vision fails
+2. **Resource cleanup**: try/finally ensures `p.disconnect()` always runs, preventing orphaned processes
+3. **Crash logging**: Exception handler with full traceback for debugging
+4. **Comprehensive logging**: [INIT], [SETUP], [VIZ], [EXIT] tags track execution flow
+
+**Log location**: `/tmp/scout_final_test.log` (or specify with `> your_log.txt`)
 
 ## Development Notes
 

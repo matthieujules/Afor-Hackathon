@@ -50,18 +50,20 @@ LAMBDA_GLOW = 1.5       # weight on following the "lead" (continuity)
 SACCADE_COST = 0.05     # cost of rotating (degrees)
 
 # Vision model settings
+print("[INIT] Starting vision system...", flush=True)
 USE_REAL_VLM = os.getenv('USE_VLM', '0') == '1'
 if USE_REAL_VLM:
-    print("Vision Mode: VLM (Gemini/OpenAI)")
+    print("[INIT] Vision Mode: VLM (Gemini/OpenAI)", flush=True)
     from vlm_client import VLMClient
     vlm_client = VLMClient(provider="gemini")
 else:
     # Use DINOv2 by default for fast, local vision analysis (no auth required)
     # Set USE_DINOV3=1 to use DINOv3 instead (requires Hugging Face auth)
-    print("Vision Mode: DINO (Local Model)")
+    print("[INIT] Vision Mode: DINO (Local Model)", flush=True)
     from vision_alternatives import DinoV2Client
+    print("[INIT] Initializing DinoV2Client...", flush=True)
     vlm_client = DinoV2Client()
-    print()
+    print("[INIT] Vision client initialized successfully", flush=True)
 
 # Bayesian update parameters
 CONFIDENCE_DECAY = 0.10
@@ -234,28 +236,42 @@ def choose_next_angle(robot_pos, current_heading):
 # ============================================================================
 
 def setup_env():
+    print("[SETUP] Connecting to PyBullet GUI...")
     p.connect(p.GUI)
+    print("[SETUP] PyBullet connected")
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
     p.setGravity(0, 0, -9.8)
     
     # Room
+    print("[SETUP] Loading ground plane...")
     p.loadURDF("plane.urdf")
-    # Walls
-    p.loadURDF("cube.urdf", [10, 0, 1], globalScaling=10)
-    p.loadURDF("cube.urdf", [-10, 0, 1], globalScaling=10)
-    p.loadURDF("cube.urdf", [0, 10, 1], globalScaling=10)
-    p.loadURDF("cube.urdf", [0, -10, 1], globalScaling=10)
-    
-    # === INTERESTING ZONE (Right) ===
-    # Cluttered shelves, boxes, red canisters
+
+    # Walls - proper 20x20m enclosure with grounded walls
+    print("[SETUP] Loading walls...")
+    # Walls are 10m cubes, centered at z=5 (bottom at z=0, top at z=10)
+    # Positioned at ±10m to create 20x20m enclosure
+    p.loadURDF("cube.urdf", [10, 0, 5], globalScaling=10)  # East wall
+    p.loadURDF("cube.urdf", [-10, 0, 5], globalScaling=10)  # West wall
+    p.loadURDF("cube.urdf", [0, 10, 5], globalScaling=10)  # North wall
+    p.loadURDF("cube.urdf", [0, -10, 5], globalScaling=10)  # South wall
+    print("[SETUP] Walls created (20m x 20m enclosure)")
+
+    # === INTERESTING ZONE (Right/East) ===
+    print("[SETUP] Creating interesting zone (East)...")
+    # Cluttered area with boxes - visible from robot at origin
     for i in range(5):
-        p.loadURDF("cube.urdf", [6 + np.random.uniform(-1,1), 
-                                 -5 + i*2 + np.random.uniform(-0.5,0.5), 0.5], 
-                   globalScaling=0.8)
-        
-    # A "Trail" of small objects leading to the clutter
+        x = 4 + i  # X: 4 to 8 meters east
+        y = -2 + i * 0.8  # Y: -2 to +1 meters
+        box_id = p.loadURDF("cube.urdf", [x, y, 0.5], globalScaling=1.0)
+        print(f"  Box {i+1} at ({x:.1f}, {y:.1f}, 0.5)")
+
+    # Trail of ducks leading to clutter - robot should follow this
+    print("[SETUP] Creating duck trail...")
     for i in range(5):
-        p.loadURDF("duck_vhacd.urdf", [2 + i, -5 + i*0.5, 0.5], globalScaling=3.0)
+        x = 1 + i  # X: 1 to 5 meters east
+        y = -1 + i * 0.3  # Y: -1 to +0.2 meters
+        duck_id = p.loadURDF("duck_vhacd.urdf", [x, y, 0.5], globalScaling=2.0)
+        print(f"  Duck {i+1} at ({x:.1f}, {y:.1f}, 0.5)")
 
     # === BORING ZONE (Left) ===
     # Empty
@@ -287,23 +303,33 @@ def get_camera_image(robot_id, yaw):
 
 def main():
     global current_yaw
-    
+
+    print("[MAIN] Starting main function...")
     robot_id = setup_env()
-    
+    print("[MAIN] Environment setup complete")
+
     # Dashboard
+    print("[VIZ] Setting up matplotlib visualization...")
     plt.ion()
+    print("[VIZ] Creating figure...")
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    ax_map = axes[0]
-    ax_glow = axes[1]
-    ax_cam = axes[2]
-    
-    ax_map.set_title("Semantic Interest Map")
-    ax_glow.set_title("Predictive Glow (Curiosity)")
-    ax_cam.set_title("Robot Vision")
-    
-    img_map = ax_map.imshow(interest_map, vmin=0, vmax=1, cmap='magma', origin='lower')
-    img_glow = ax_glow.imshow(glow_map, vmin=0, vmax=1, cmap='Blues', origin='lower')
-    img_cam = ax_cam.imshow(np.zeros((320, 320, 3)))
+    print("[VIZ] Figure created")
+    ax_pca = axes[0]
+    ax_attention = axes[1]
+    ax_similarity = axes[2]
+
+    ax_pca.set_title("DINOv3 PCA Rainbow (Semantic Regions)")
+    ax_attention.set_title("DINOv3 Attention Map (Focus Areas)")
+    ax_similarity.set_title("DINOv3 Patch Similarity (Center)")
+
+    # Initialize with dummy data (will be updated)
+    img_pca = ax_pca.imshow(np.zeros((14, 14, 3)))
+    img_attention = ax_attention.imshow(np.zeros((14, 14)), cmap='hot', vmin=0, vmax=1)
+    img_similarity = ax_similarity.imshow(np.zeros((14, 14)), cmap='viridis', vmin=0, vmax=1)
+
+    ax_pca.axis('off')
+    ax_attention.axis('off')
+    ax_similarity.axis('off')
     
     print("PANOPTICON ACTIVATED. Scanning for Interest...")
     
@@ -311,21 +337,26 @@ def main():
     try:
         while True:
             p.stepSimulation()
-            
+
             # Rotate robot visually
             quat = p.getQuaternionFromEuler([0, 0, current_yaw])
             p.resetBasePositionAndOrientation(robot_id, [0,0,0.5], quat)
-            
+
             if step % 100 == 0: # Every ~5 seconds (at 20Hz sim speed for demo)
-                
+
                 # 1. Capture
                 rgb = get_camera_image(robot_id, current_yaw)
                 img_cam.set_data(rgb)
-                
-                # 2. Analyze (VLM)
+
+                # 2. Analyze (Vision - with error handling for robustness)
                 print(f"Analyzing view at {math.degrees(current_yaw):.1f}°...")
-                analysis = vlm_client.analyze_scene(rgb)
-                
+                try:
+                    analysis = vlm_client.analyze_scene(rgb)
+                except Exception as e:
+                    print(f"  WARNING: Vision analysis failed - {e}")
+                    print(f"  Continuing with safe defaults...")
+                    analysis = {'interest_score': 0.1, 'lead_direction': 'none', 'hazard_score': 0.1}
+
                 i_score = analysis.get('interest_score', 0.1)
                 lead = analysis.get('lead_direction', 'none')
                 print(f"  Interest: {i_score:.2f} | Lead: {lead}")
@@ -369,9 +400,18 @@ def main():
                 
             time.sleep(0.01)
             step += 1
-            
+
     except KeyboardInterrupt:
+        print("\n[EXIT] Keyboard interrupt - shutting down...", flush=True)
+    except Exception as e:
+        print(f"\n[CRASH] Simulation crashed with error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Always cleanup PyBullet resources, even on crashes
+        print("[EXIT] Disconnecting PyBullet...", flush=True)
         p.disconnect()
+        print("[EXIT] Cleanup complete", flush=True)
 
 if __name__ == "__main__":
     main()

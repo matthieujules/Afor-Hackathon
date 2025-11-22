@@ -200,17 +200,21 @@ class DinoV2Client(BaseVisionClient):
             # === INTEREST SCORE: Measure visual complexity ===
             variance = torch.var(patch_tokens, dim=1).mean().item()
 
-            # Empirically calibrated thresholds for DINOv2:
-            # - Blank wall: ~0.003-0.008
-            # - Moderate clutter: ~0.015-0.025
-            # - High clutter: >0.03
+            # Debug: Print variance to help with calibration
+            print(f"    [DINOv2] Raw variance: {variance:.6f}")
 
-            if variance < 0.008:
+            # Empirically calibrated thresholds for DINOv2 with PyBullet:
+            # Based on observed values from actual PyBullet renders:
+            # - Empty walls / boring scenes: ~2.90-2.95
+            # - Moderate clutter: ~2.95-3.05
+            # - High clutter / objects: >3.05
+
+            if variance < 2.95:
                 interest_score = 0.1
-            elif variance > 0.03:
+            elif variance > 3.05:
                 interest_score = 1.0
             else:
-                interest_score = (variance - 0.008) / (0.03 - 0.008)
+                interest_score = (variance - 2.95) / (3.05 - 2.95)
                 interest_score = min(max(interest_score, 0.1), 1.0)
 
             # === LEAD DIRECTION: Detect where visual interest continues ===
@@ -255,10 +259,11 @@ class DinoV2Client(BaseVisionClient):
 
         # 2. Run DINOv3 inference
         with torch.no_grad():
-            outputs = self.model(**inputs)
+            outputs = self.model(**inputs, output_attentions=True)
 
             # DINOv3 outputs: [CLS, 4 register tokens, 196 patch tokens] = 201 total
             all_tokens = outputs.last_hidden_state  # Shape: (1, 201, 384)
+            attentions = outputs.attentions  # Tuple of attention weights per layer
 
             # Extract only the patch tokens (skip CLS + 4 registers)
             patch_tokens = all_tokens[:, 5:, :]  # Shape: (1, 196, 384)
@@ -266,14 +271,20 @@ class DinoV2Client(BaseVisionClient):
             # === INTEREST SCORE: Measure visual complexity ===
             variance = torch.var(patch_tokens, dim=1).mean().item()
 
-            # Empirically calibrated thresholds for DINOv3:
-            # DINOv3 has slightly different variance ranges
-            if variance < 0.012:
+            # Debug: Print variance to help with calibration
+            print(f"    [DINOv3] Raw variance: {variance:.6f}")
+
+            # Empirically calibrated thresholds for DINOv3 with PyBullet:
+            # Based on observed values from actual PyBullet renders:
+            # - Empty walls / boring scenes: ~0.027-0.028
+            # - Objects / ducks visible: ~0.029-0.030
+            # - High clutter: >0.031
+            if variance < 0.028:
                 interest_score = 0.1
-            elif variance > 0.045:
+            elif variance > 0.031:
                 interest_score = 1.0
             else:
-                interest_score = (variance - 0.012) / (0.045 - 0.012)
+                interest_score = (variance - 0.028) / (0.031 - 0.028)
                 interest_score = min(max(interest_score, 0.1), 1.0)
 
             # === LEAD DIRECTION: Detect where visual interest continues ===
@@ -300,10 +311,51 @@ class DinoV2Client(BaseVisionClient):
             elif max(left_edge, right_edge) > edge_threshold:
                 lead = 'center'
 
+            # === SEMANTIC VISUALIZATIONS (Meta DINOv3 style) ===
+            import numpy as np
+            from sklearn.decomposition import PCA
+
+            # 1. PCA Rainbow Visualization (Meta's signature viz)
+            patches_np = patch_tokens.squeeze(0).cpu().numpy()  # (196, 384)
+            pca = PCA(n_components=3)
+            pca_features = pca.fit_transform(patches_np)  # (196, 3)
+
+            # Normalize to [0, 1] for RGB
+            pca_min = pca_features.min(axis=0)
+            pca_max = pca_features.max(axis=0)
+            pca_rgb = (pca_features - pca_min) / (pca_max - pca_min + 1e-8)
+
+            # Reshape to 14x14x3 image
+            pca_vis = pca_rgb.reshape(h, w, 3)
+
+            # 2. Attention Map (average across heads and layers)
+            # Use last layer attention: (1, num_heads, 201, 201)
+            last_attention = attentions[-1]  # Last transformer layer
+            # Average across heads: (1, 201, 201) → (201, 201)
+            avg_attention = last_attention.mean(dim=1).squeeze(0).cpu().numpy()
+
+            # Extract attention to patch tokens from CLS token (row 0, cols 5:)
+            cls_to_patches = avg_attention[0, 5:]  # (196,)
+            attention_map = cls_to_patches.reshape(h, w)  # (14, 14)
+
+            # 3. Patch Similarity Map (center patch vs all others)
+            center_idx = (h // 2) * w + (w // 2)  # Middle patch
+            center_patch = patches_np[center_idx]  # (384,)
+
+            # Cosine similarity
+            similarities = np.dot(patches_np, center_patch) / (
+                np.linalg.norm(patches_np, axis=1) * np.linalg.norm(center_patch) + 1e-8
+            )
+            similarity_map = similarities.reshape(h, w)  # (14, 14)
+
         return {
             'interest_score': interest_score,
             'lead_direction': lead,
-            'hazard_score': 0.1
+            'hazard_score': 0.1,
+            # DINOv3 semantic visualizations
+            'pca_vis': pca_vis,  # (14, 14, 3) rainbow semantic map
+            'attention_map': attention_map,  # (14, 14) attention heatmap
+            'similarity_map': similarity_map  # (14, 14) patch similarity
         }
 
     def _fallback_analysis(self, image_rgb):
