@@ -16,8 +16,13 @@ Core innovation: Instead of exhaustively scanning, the agent follows visual trai
 # Install dependencies
 pip3 install -r requirements.txt
 
-# Run with DINOv2 (default - local model, no auth)
-python3 scout_semantix.py
+# Start web dashboard server (browser-based visualization)
+python3 src/web_dashboard.py &
+
+# Start simulation (DINOv2 by default)
+python3 src/scout_semantix.py
+
+# Open browser to: http://localhost:8080
 
 # Run tests
 python3 tests/test_components.py
@@ -26,20 +31,20 @@ python3 tests/test_dinov3.py
 
 ### Vision Model Options
 
-**DINOv2 (Default)** - Local vision transformer, no authentication
+**DINOv2 (Default)** - Local vision transformer via torch.hub
 ```bash
-python3 scout_semantix.py
+python3 src/scout_semantix.py
 ```
 
-**DINOv3** - Requires Hugging Face authentication (see `docs/DINOV3_SETUP.md`)
+**DINOv3** - Local vision transformer via Hugging Face
 ```bash
-USE_DINOV3=1 python3 scout_semantix.py
+USE_DINOV3=1 python3 src/scout_semantix.py
 ```
 
-**VLM Mode** - Uses Gemini/OpenAI APIs
+**VLM Mode** - Uses Gemini/OpenAI APIs (legacy)
 ```bash
 export GEMINI_API_KEY="your_key"
-USE_VLM=1 python3 scout_semantix.py
+USE_VLM=1 python3 src/scout_semantix.py
 ```
 
 ## Architecture

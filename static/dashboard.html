@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantix Dashboard - The Panopticon</title>
+    <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+    <div class="header">
+        <h1>Semantix: The Panopticon</h1>
+        <div class="status-bar">
+            <span id="connection-status" class="status disconnected">Disconnected</span>
+            <span id="fps-counter" class="status">FPS: 0.0</span>
+            <span id="timestamp" class="status">Waiting for data...</span>
+        </div>
+    </div>
+
+    <div class="dashboard-grid">
+        <!-- Row 1 -->
+        <div class="panel">
+            <div class="panel-header">Live Feed (~10 FPS)</div>
+            <div class="panel-content">
+                <img id="live-feed" src="" alt="Live camera feed">
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">DINOv3 PCA Rainbow</div>
+            <div class="panel-content">
+                <img id="pca-vis" src="" alt="PCA visualization">
+                <div id="pca-placeholder" class="placeholder">Waiting for DINOv3 data...</div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">Patch Similarity Map</div>
+            <div class="panel-content">
+                <img id="similarity-map" src="" alt="Similarity map">
+                <div id="similarity-placeholder" class="placeholder">Waiting for DINOv3 data...</div>
+            </div>
+        </div>
+
+        <!-- Row 2 -->
+        <div class="panel">
+            <div class="panel-header">Analysis Snapshot (Every 5s)</div>
+            <div class="panel-content">
+                <img id="snapshot" src="" alt="Analysis snapshot">
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">DINOv3 Attention Map</div>
+            <div class="panel-content">
+                <img id="attention-map" src="" alt="Attention map">
+                <div id="attention-placeholder" class="placeholder">Waiting for DINOv3 data...</div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">Status & Metrics</div>
+            <div class="panel-content status-panel">
+                <div class="metric-row">
+                    <span class="metric-label">Interest Score:</span>
+                    <span id="interest-score" class="metric-value">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Lead Direction:</span>
+                    <span id="lead-direction" class="metric-value">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Current Heading:</span>
+                    <span id="current-heading" class="metric-value">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Decision:</span>
+                    <span id="decision" class="metric-value">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Entropy Score:</span>
+                    <span id="entropy-score" class="metric-value">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Glow Score:</span>
+                    <span id="glow-score" class="metric-value">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Frames Received:</span>
+                    <span id="frame-count" class="metric-value">0</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let frameCount = 0;
+        let lastFrameTime = Date.now();
+        let reconnectAttempts = 0;
+        const maxReconnectDelay = 5000;
+
+        // Connect to WebSocket
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+            console.log('Connecting to:', wsUrl);
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                document.getElementById('connection-status').textContent = 'Connected';
+                document.getElementById('connection-status').className = 'status connected';
+                reconnectAttempts = 0;
+
+                // Send periodic pings to keep connection alive
+                setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send('ping');
+                    }
+                }, 30000);
+            };
+
+            ws.onmessage = (event) => {
+                if (event.data === 'pong') return;
+
+                try {
+                    const data = JSON.parse(event.data);
+                    updateDashboard(data);
+                } catch (e) {
+                    console.error('Error parsing message:', e);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                document.getElementById('connection-status').textContent = 'Disconnected';
+                document.getElementById('connection-status').className = 'status disconnected';
+
+                // Exponential backoff reconnection
+                const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
+                reconnectAttempts++;
+                console.log(`Reconnecting in ${delay}ms...`);
+                setTimeout(connect, delay);
+            };
+        }
+
+        function updateDashboard(data) {
+            // Update FPS counter
+            const now = Date.now();
+            const fps = 1000 / (now - lastFrameTime);
+            lastFrameTime = now;
+            document.getElementById('fps-counter').textContent = `FPS: ${fps.toFixed(1)}`;
+
+            // Update timestamp
+            if (data.timestamp) {
+                const date = new Date(data.timestamp * 1000);
+                document.getElementById('timestamp').textContent = date.toLocaleTimeString();
+            }
+
+            // Update frame count
+            frameCount++;
+            document.getElementById('frame-count').textContent = frameCount;
+
+            // Update images (base64 encoded)
+            if (data.live_feed) {
+                document.getElementById('live-feed').src = `data:image/png;base64,${data.live_feed}`;
+            }
+
+            if (data.snapshot) {
+                document.getElementById('snapshot').src = `data:image/png;base64,${data.snapshot}`;
+            }
+
+            if (data.pca_vis) {
+                document.getElementById('pca-vis').src = `data:image/png;base64,${data.pca_vis}`;
+                document.getElementById('pca-vis').style.display = 'block';
+                document.getElementById('pca-placeholder').style.display = 'none';
+            }
+
+            if (data.attention_map) {
+                document.getElementById('attention-map').src = `data:image/png;base64,${data.attention_map}`;
+                document.getElementById('attention-map').style.display = 'block';
+                document.getElementById('attention-placeholder').style.display = 'none';
+            }
+
+            if (data.similarity_map) {
+                document.getElementById('similarity-map').src = `data:image/png;base64,${data.similarity_map}`;
+                document.getElementById('similarity-map').style.display = 'block';
+                document.getElementById('similarity-placeholder').style.display = 'none';
+            }
+
+            // Update metrics
+            if (data.metrics) {
+                const m = data.metrics;
+
+                if (m.interest_score !== undefined) {
+                    document.getElementById('interest-score').textContent = m.interest_score.toFixed(2);
+                }
+
+                if (m.lead_direction) {
+                    document.getElementById('lead-direction').textContent = m.lead_direction;
+                }
+
+                if (m.current_heading !== undefined) {
+                    document.getElementById('current-heading').textContent = `${m.current_heading.toFixed(1)}°`;
+                }
+
+                if (m.decision) {
+                    document.getElementById('decision').textContent = m.decision;
+                }
+
+                if (m.entropy_score !== undefined) {
+                    document.getElementById('entropy-score').textContent = m.entropy_score.toFixed(1);
+                }
+
+                if (m.glow_score !== undefined) {
+                    document.getElementById('glow-score').textContent = m.glow_score.toFixed(1);
+                }
+            }
+        }
+
+        // Initialize connection on page load
+        connect();
+    </script>
+</body>
+</html>

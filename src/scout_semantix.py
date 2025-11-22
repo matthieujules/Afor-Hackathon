@@ -19,13 +19,20 @@ References:
 import pybullet as p
 import pybullet_data
 import numpy as np
-import matplotlib
-matplotlib.use('MacOSX')
-import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Wedge
 import time
 import os
 import math
+import threading
+import asyncio
+import base64
+from io import BytesIO
+
+# Use Agg backend for matplotlib (headless rendering)
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle, Wedge
+
 from vlm_client import VLMClient
 
 # ============================================================================
@@ -68,6 +75,9 @@ else:
 # Bayesian update parameters
 CONFIDENCE_DECAY = 0.10
 
+# WebSocket client for dashboard
+ws_client = None
+
 # ============================================================================
 # STATE
 # ============================================================================
@@ -82,6 +92,112 @@ glow_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
 # Robot State
 current_yaw = 0.0 # radians
+
+# ============================================================================
+# WEBSOCKET CLIENT
+# ============================================================================
+
+class DashboardClient:
+    """WebSocket client to send data to web dashboard"""
+    def __init__(self, url="ws://localhost:8080/ws/data"):
+        self.url = url
+        self.websocket = None
+        self.loop = None
+        self.thread = None
+        self.queue = asyncio.Queue()
+
+    def start(self):
+        """Start WebSocket client in background thread"""
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+        print(f"[WS] Dashboard client started, connecting to {self.url}")
+
+    def _run_loop(self):
+        """Run asyncio event loop in thread"""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self._connect_and_send())
+
+    async def _connect_and_send(self):
+        """Connect to WebSocket and send queued data"""
+        import websockets
+
+        while True:
+            try:
+                async with websockets.connect(self.url) as websocket:
+                    self.websocket = websocket
+                    print("[WS] Connected to dashboard")
+
+                    while True:
+                        # Get data from queue
+                        data = await self.queue.get()
+
+                        # Send to dashboard
+                        await websocket.send(data)
+
+            except Exception as e:
+                print(f"[WS] Connection error: {e}, retrying in 2s...")
+                self.websocket = None
+                await asyncio.sleep(2)
+
+    def send(self, data: dict):
+        """Queue data to send to dashboard"""
+        if self.loop:
+            import json
+            # Convert numpy types to native Python types before JSON serialization
+            data_clean = convert_numpy_types(data)
+            asyncio.run_coroutine_threadsafe(
+                self.queue.put(json.dumps(data_clean)),
+                self.loop
+            )
+
+def convert_numpy_types(obj):
+    """Recursively convert numpy types to native Python types for JSON serialization"""
+    if isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
+
+def numpy_to_base64_png(img_array):
+    """Convert numpy array to base64 PNG string"""
+    # Handle different input formats
+    if img_array.dtype != np.uint8:
+        # Normalize to 0-255 if needed
+        if img_array.max() <= 1.0:
+            img_array = (img_array * 255).astype(np.uint8)
+        else:
+            img_array = img_array.astype(np.uint8)
+
+    # Create matplotlib figure
+    fig, ax = plt.subplots(figsize=(3.2, 3.2), dpi=100)
+    ax.axis('off')
+
+    if len(img_array.shape) == 2:
+        # Grayscale or heatmap
+        ax.imshow(img_array, cmap='hot')
+    else:
+        # RGB
+        ax.imshow(img_array)
+
+    plt.tight_layout(pad=0)
+
+    # Save to buffer
+    buf = BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+
+    # Encode as base64
+    buf.seek(0)
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return img_base64
 
 # ============================================================================
 # MAPPING UTILITIES
@@ -101,7 +217,7 @@ def grid_to_world(grid_yx):
 def get_fov_mask(robot_pos, heading, fov_deg, max_range):
     """Returns a list of (gy, gx) cells in the current FOV."""
     cells = set()
-    
+
     # Ray casting
     angles = np.linspace(-np.radians(fov_deg/2), np.radians(fov_deg/2), FOV_RAYS)
     for angle_offset in angles:
@@ -112,19 +228,19 @@ def get_fov_mask(robot_pos, heading, fov_deg, max_range):
             gy, gx = world_to_grid([x, y])
             if 0 <= gy < GRID_SIZE and 0 <= gx < GRID_SIZE:
                 cells.add((gy, gx))
-                
+
     return list(cells)
 
 def update_map(fov_cells, interest_score):
     """Update the semantic map with the VLM's interest score."""
     global interest_map, seen_map
-    
+
     for gy, gx in fov_cells:
         # Simple update: weighted average or max
         # Here we trust the latest VLM score but decay it slightly over distance?
         # For simplicity: Max aggregation (if we saw it was interesting once, it stays interesting)
         # But we also need to handle "Boring" updates overwriting "Unknown".
-        
+
         # If previously unseen, take the value.
         # If seen, average it?
         if seen_map[gy, gx] == 0:
@@ -132,20 +248,20 @@ def update_map(fov_cells, interest_score):
         else:
             # Moving average
             interest_map[gy, gx] = 0.7 * interest_map[gy, gx] + 0.3 * interest_score
-            
+
         seen_map[gy, gx] = 1.0
 
 def project_glow(robot_pos, current_heading, lead_direction):
     """
     Project 'White Glow' (Predicted Interest) based on Visual Continuity.
-    
+
     If lead_direction is 'left', project a cone to the left of the current FOV.
     """
     global glow_map
-    
+
     # Decay old glow
-    glow_map *= 0.5 
-    
+    glow_map *= 0.5
+
     if lead_direction == 'none' or lead_direction == 'center':
         return
 
@@ -156,22 +272,22 @@ def project_glow(robot_pos, current_heading, lead_direction):
         angle_offset = np.radians(FOV_DEGREES/2 + 20) # Look 20 deg past the edge
     elif lead_direction == 'right':
         angle_offset = -np.radians(FOV_DEGREES/2 + 20)
-        
+
     target_angle = current_heading + angle_offset
-    
+
     # Project a "Cone of Curiosity"
     # We use the same raycasting logic but write to glow_map
     # The cone is wider and fuzzier
     cone_width = 40 # degrees
     angles = np.linspace(-np.radians(cone_width/2), np.radians(cone_width/2), 20)
-    
+
     for ang in angles:
         ray_angle = target_angle + ang
         for r in np.arange(1.0, MAX_RANGE * 0.8, CELL_SIZE):
             x = robot_pos[0] + r * np.cos(ray_angle)
             y = robot_pos[1] + r * np.sin(ray_angle)
             gy, gx = world_to_grid([x, y])
-            
+
             if 0 <= gy < GRID_SIZE and 0 <= gx < GRID_SIZE:
                 # Only glow in UNSEEN areas
                 if seen_map[gy, gx] < 0.5:
@@ -190,26 +306,26 @@ def calculate_view_utility(robot_pos, candidate_heading):
     """
     # Get cells in this candidate view
     cells = get_fov_mask(robot_pos, candidate_heading, FOV_DEGREES, MAX_RANGE)
-    
+
     u_entropy = 0
     u_glow = 0
-    
+
     for gy, gx in cells:
         is_seen = seen_map[gy, gx]
-        
+
         # Entropy: High if unseen
         if not is_seen:
             u_entropy += 1.0
-            
+
         # Glow: High if we predicted something there
         u_glow += glow_map[gy, gx]
-        
+
     # Normalize? No, we want total information gain.
     if len(cells) == 0: return 0, (0, 0)
-    
+
     score_entropy = LAMBDA_ENTROPY * u_entropy
     score_glow = LAMBDA_GLOW * u_glow
-    
+
     total_score = score_entropy + score_glow
     return total_score, (score_entropy, score_glow)
 
@@ -218,17 +334,17 @@ def choose_next_angle(robot_pos, current_heading):
     best_angle = current_heading
     best_score = -1e9
     best_components = (0, 0)
-    
+
     candidates = np.linspace(0, 2*np.pi, 16, endpoint=False) # 16 directions
-    
+
     for ang in candidates:
         score, components = calculate_view_utility(robot_pos, ang)
-        
+
         if score > best_score:
             best_score = score
             best_angle = ang
             best_components = components
-            
+
     return best_angle, best_score, best_components
 
 # ============================================================================
@@ -333,47 +449,23 @@ def get_camera_image(robot_id, yaw):
 # ============================================================================
 
 def main():
-    global current_yaw
+    global current_yaw, ws_client
 
     print("[MAIN] Starting main function...")
+
+    # Start dashboard client
+    print("[MAIN] Starting web dashboard client...")
+    ws_client = DashboardClient()
+    ws_client.start()
+    time.sleep(1)  # Give WebSocket time to connect
+
     robot_id = setup_env()
     print("[MAIN] Environment setup complete")
-
-    # Dashboard - 2x3 grid: Live feed + Analysis snapshot + 3 semantic visualizations
-    print("[VIZ] Setting up matplotlib visualization...")
-    plt.ion()
-    print("[VIZ] Creating figure...")
-    fig = plt.figure(figsize=(18, 10))
-    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
-
-    ax_live = fig.add_subplot(gs[0, 0])
-    ax_snapshot = fig.add_subplot(gs[1, 0])
-    ax_pca = fig.add_subplot(gs[0, 1])
-    ax_attention = fig.add_subplot(gs[1, 1])
-    ax_similarity = fig.add_subplot(gs[0, 2])
-
-    print("[VIZ] Figure created")
-
-    ax_live.set_title("LIVE FEED (~10 FPS)", fontweight='bold', fontsize=12, color='red')
-    ax_snapshot.set_title("Analysis Snapshot (Every 5s)", fontweight='bold', fontsize=10)
-    ax_pca.set_title("DINOv3 PCA Rainbow", fontsize=10)
-    ax_attention.set_title("DINOv3 Attention Map", fontsize=10)
-    ax_similarity.set_title("DINOv3 Patch Similarity", fontsize=10)
-
-    # Initialize with dummy data (will be updated)
-    img_live = ax_live.imshow(np.zeros((320, 320, 3), dtype=np.uint8))
-    img_snapshot = ax_snapshot.imshow(np.zeros((320, 320, 3), dtype=np.uint8))
-    img_pca = ax_pca.imshow(np.zeros((14, 14, 3)))
-    img_attention = ax_attention.imshow(np.zeros((14, 14)), cmap='hot', vmin=0, vmax=1)
-    img_similarity = ax_similarity.imshow(np.zeros((14, 14)), cmap='viridis', vmin=0, vmax=1)
-
-    ax_live.axis('off')
-    ax_snapshot.axis('off')
-    ax_pca.axis('off')
-    ax_attention.axis('off')
-    ax_similarity.axis('off')
-    
-    print("PANOPTICON ACTIVATED. Scanning for Interest...")
+    print("\n" + "="*60)
+    print("PANOPTICON ACTIVATED - Web Dashboard Mode")
+    print("="*60)
+    print("Open browser to: http://localhost:8080")
+    print("="*60 + "\n")
 
     # Set initial robot orientation
     quat = p.getQuaternionFromEuler([0, 0, current_yaw])
@@ -381,6 +473,8 @@ def main():
 
     step = 0
     last_yaw = current_yaw  # Track when rotation actually changes
+    last_snapshot = None
+    last_analysis = {}
 
     try:
         while True:
@@ -390,20 +484,25 @@ def main():
             # Live feed update (~10 FPS at 20Hz sim speed)
             if step % 2 == 0:
                 live_rgb = get_camera_image(robot_id, current_yaw)
-                img_live.set_data(live_rgb)
-                # Draw live feed updates more frequently
-                if step % 10 == 0:  # Update display every 10 steps to reduce overhead
-                    fig.canvas.draw_idle()
-                    fig.canvas.flush_events()
+
+                # Send to dashboard
+                if ws_client:
+                    ws_client.send({
+                        'timestamp': time.time(),
+                        'live_feed': numpy_to_base64_png(live_rgb),
+                        'snapshot': last_snapshot,
+                        'metrics': {
+                            'current_heading': math.degrees(current_yaw),
+                            **last_analysis
+                        }
+                    })
 
             # Full vision analysis (every ~5 seconds)
             if step % 100 == 0:
 
                 # 1. Capture snapshot for analysis
                 rgb = get_camera_image(robot_id, current_yaw)
-
-                # Update analysis snapshot view
-                img_snapshot.set_data(rgb)
+                last_snapshot = numpy_to_base64_png(rgb)
 
                 # 2. Analyze (Vision - with error handling for robustness)
                 print(f"Analyzing view at {math.degrees(current_yaw):.1f}°...")
@@ -417,23 +516,63 @@ def main():
                 i_score = analysis.get('interest_score', 0.1)
                 lead = analysis.get('lead_direction', 'none')
                 print(f"  Interest: {i_score:.2f} | Lead: {lead}")
-                
+
                 # 3. Update Map
                 fov_cells = get_fov_mask([0,0], current_yaw, FOV_DEGREES, MAX_RANGE)
                 update_map(fov_cells, i_score)
-                
+
                 # 4. Project Glow (Curiosity)
                 project_glow([0,0], current_yaw, lead)
-                
+
                 # 5. Plan Next Saccade
                 next_yaw, score, (s_ent, s_glow) = choose_next_angle([0,0], current_yaw)
-                
+
                 reason = "Exploration (Entropy)"
                 if s_glow > s_ent:
                     reason = "Curiosity (Following Glow)"
-                    
+
                 print(f"  Decision: {reason}")
                 print(f"  Saccading to {math.degrees(next_yaw):.1f}° (Ent: {s_ent:.1f}, Glow: {s_glow:.1f})")
+
+                # Store metrics for dashboard
+                last_analysis = {
+                    'interest_score': i_score,
+                    'lead_direction': lead,
+                    'decision': reason,
+                    'entropy_score': s_ent,
+                    'glow_score': s_glow
+                }
+
+                # Send complete update with visualizations
+                dashboard_data = {
+                    'timestamp': time.time(),
+                    'live_feed': numpy_to_base64_png(rgb),
+                    'snapshot': last_snapshot,
+                    'metrics': {
+                        'current_heading': math.degrees(current_yaw),
+                        **last_analysis
+                    }
+                }
+
+                # Add DINOv3 visualizations if available
+                if 'pca_vis' in analysis:
+                    try:
+                        from scipy.ndimage import zoom
+                        # Upscale visualizations
+                        pca_upscaled = zoom(analysis['pca_vis'], (20, 20, 1), order=1)
+                        attention_upscaled = zoom(analysis['attention_map'], (20, 20), order=1)
+                        similarity_upscaled = zoom(analysis['similarity_map'], (20, 20), order=1)
+
+                        dashboard_data['pca_vis'] = numpy_to_base64_png(pca_upscaled)
+                        dashboard_data['attention_map'] = numpy_to_base64_png(attention_upscaled)
+                        dashboard_data['similarity_map'] = numpy_to_base64_png(similarity_upscaled)
+                    except Exception as e:
+                        print(f"  WARNING: Failed to upscale visualizations: {e}")
+                else:
+                    print("  WARNING: No DINOv3 visualizations available")
+
+                if ws_client:
+                    ws_client.send(dashboard_data)
 
                 # Update robot yaw
                 current_yaw = next_yaw
@@ -444,23 +583,6 @@ def main():
                     p.resetBasePositionAndOrientation(robot_id, [0, 0, 0.5], quat)
                     last_yaw = current_yaw
 
-                # Update DINOv3 Semantic Visualizations
-                if 'pca_vis' in analysis:
-                    # Upscale to make visualizations clearer
-                    from scipy.ndimage import zoom
-                    pca_upscaled = zoom(analysis['pca_vis'], (20, 20, 1), order=1)
-                    attention_upscaled = zoom(analysis['attention_map'], (20, 20), order=1)
-                    similarity_upscaled = zoom(analysis['similarity_map'], (20, 20), order=1)
-
-                    img_pca.set_data(pca_upscaled)
-                    img_attention.set_data(attention_upscaled)
-                    img_similarity.set_data(similarity_upscaled)
-                else:
-                    print("  WARNING: No DINOv3 visualizations available (using DINOv2 or fallback mode)")
-                
-                fig.canvas.draw()
-                fig.canvas.flush_events()
-                
             time.sleep(0.01)
             step += 1
 

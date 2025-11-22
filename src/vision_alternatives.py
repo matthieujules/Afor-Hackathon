@@ -244,10 +244,44 @@ class DinoV2Client(BaseVisionClient):
             elif max(left_edge, right_edge) > edge_threshold:
                 lead = 'center'
 
+            # === VISUALIZATIONS (Added for DINOv2) ===
+            import numpy as np
+            from sklearn.decomposition import PCA
+
+            # 1. PCA Rainbow Visualization
+            patches_np = patch_tokens.squeeze(0).cpu().numpy()  # (256, 384)
+            pca = PCA(n_components=3)
+            pca_features = pca.fit_transform(patches_np)  # (256, 3)
+
+            # Normalize to [0, 1]
+            pca_min = pca_features.min(axis=0)
+            pca_max = pca_features.max(axis=0)
+            pca_rgb = (pca_features - pca_min) / (pca_max - pca_min + 1e-8)
+            
+            pca_vis = pca_rgb.reshape(h, w, 3)
+
+            # 2. Similarity Map
+            center_idx = (h // 2) * w + (w // 2)
+            center_patch = patches_np[center_idx]
+            similarities = np.dot(patches_np, center_patch) / (
+                np.linalg.norm(patches_np, axis=1) * np.linalg.norm(center_patch) + 1e-8
+            )
+            similarity_map = similarities.reshape(h, w)
+
+            # 3. Attention Map (Proxy using feature energy)
+            # Normalize energy to 0-1
+            energy_np = energy.cpu().numpy()
+            att_min = energy_np.min()
+            att_max = energy_np.max()
+            attention_map = (energy_np - att_min) / (att_max - att_min + 1e-8)
+
         return {
             'interest_score': interest_score,
             'lead_direction': lead,
-            'hazard_score': 0.1
+            'hazard_score': 0.1,
+            'pca_vis': pca_vis,
+            'attention_map': attention_map,
+            'similarity_map': similarity_map
         }
 
     def _analyze_dinov3(self, image_rgb):
