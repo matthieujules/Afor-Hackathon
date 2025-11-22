@@ -409,8 +409,11 @@ def setup_env():
 def get_camera_image(robot_id, yaw):
     """Render camera view from robot head, oriented according to yaw."""
     # Camera positioned at robot head
-    cam_height = 0.8
-    pos = [0, 0, cam_height]
+    # Camera positioned at robot head (adjusted to be above/outside R2D2 body)
+    cam_height = 1.2
+    # Move camera slightly forward to avoid clipping self
+    cam_offset = 0.6 
+    pos = [cam_offset * np.cos(yaw), cam_offset * np.sin(yaw), cam_height]
 
     # Target point 2m away in the direction robot is facing
     target_distance = 2.0
