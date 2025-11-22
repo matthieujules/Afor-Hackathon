@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Semantix: Research-Grade Proactive Hazard Scout with Discrete Vision
+Semantix: "The Panopticon" - Stationary Active Vision Scout
 
-Implements Language-as-Cost (LaC) perception + Semantic-Entropy guided exploration
-for robotic hazard mapping under severe perception constraints (0.2 Hz vision).
+Implements Semantic Curiosity & Visual Continuity for a stationary agent.
+The agent rotates its view (saccades) to maximize Information Gain.
 
 Key Features:
-- VLM-style hazard scoring → Bayesian Beta posterior per grid cell
-- Semantic entropy quantification for epistemic uncertainty
-- "White glow" prediction for unseen high-value regions (Gaussian spatial prior)
-- Event-triggered replanning (5s frame period, simulating RasPi constraints)
-- 2×2 Mission Control dashboard: visited | hazard | entropy | utility
+- "Interest Score": VLM rates visual complexity/clutter.
+- "Visual Continuity": VLM predicts where interesting stuff goes (Left/Right).
+- "Glow Projection": Projects utility into unseen areas based on continuity.
+- "Saccadic Planning": Chooses the next view angle to maximize (Interest + Glow + Entropy).
 
 References:
-[1] Language-as-Cost: Proactive Hazard Mapping using VLM (arXiv:2508.03138)
-[2] Active semantic exploration (ActiveSGM/ActiveGAMER)
+[1] Language-as-Cost: Proactive Hazard Mapping using VLM
+[2] Active Vision & Saccadic Exploration
 """
 
 import pybullet as p
@@ -23,980 +22,354 @@ import numpy as np
 import matplotlib
 matplotlib.use('MacOSX')
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, FancyArrow
+from matplotlib.patches import Circle, Wedge
 import time
 import os
+import math
+from vlm_client import VLMClient
 
 # ============================================================================
 # GLOBAL PARAMETERS
 # ============================================================================
 
-# Grid world configuration
+# Grid world configuration (Polar-ish usage, but kept Cartesian for map ease)
 GRID_SIZE = 64          # 64×64 grid
 WORLD_SIZE = 20.0       # ±10m square world
 CELL_SIZE = WORLD_SIZE / GRID_SIZE
 
-# Vision system (discrete, RasPi-like)
+# Vision system
 FRAME_PERIOD = 5.0      # seconds between frames (0.2 Hz)
-FOV_DEGREES = 70        # field of view
-MAX_RANGE = 6.0         # max vision range (meters)
-FOV_RAYS = 31           # ray density for FOV projection
+FOV_DEGREES = 60        # field of view
+MAX_RANGE = 8.0         # max vision range (meters)
+FOV_RAYS = 40           # ray density
 
-# Utility weights (for Language-as-Cost planning)
-LAMBDA_HAZARD = 1.0     # weight on expected hazard value
-LAMBDA_ENTROPY = 0.5    # weight on epistemic uncertainty
-LAMBDA_GLOW = 0.8       # weight on predicted unseen value (white glow)
-LAMBDA_PATH = 0.1       # cost on path distance
+# Utility weights
+LAMBDA_INTEREST = 1.0   # weight on seeing interesting things
+LAMBDA_ENTROPY = 0.8    # weight on exploring the unknown
+LAMBDA_GLOW = 1.5       # weight on following the "lead" (continuity)
+SACCADE_COST = 0.05     # cost of rotating (degrees)
 
 # VLM settings
-USE_REAL_VLM = os.getenv('USE_VLM', '0') == '1'  # set USE_VLM=1 for real VLM
-VLM_ENDPOINT = os.getenv('VLM_ENDPOINT', 'http://localhost:8000/score')
+USE_REAL_VLM = os.getenv('USE_VLM', '0') == '1'
+vlm_client = VLMClient(provider="gemini" if USE_REAL_VLM else "mock")
 
 # Bayesian update parameters
-CONFIDENCE_DECAY = 0.15  # w = exp(-kappa * range)
-STALENESS_THRESHOLD = 2.0  # seconds; reduce weight if updated too recently
-
-# Ablation modes (toggle with keyboard)
-ABLATION_MODE = 'full'  # 'hazard_only', 'entropy_only', 'full'
+CONFIDENCE_DECAY = 0.10
 
 # ============================================================================
-# BAYESIAN MAPPING STATE
+# STATE
 # ============================================================================
 
-# Beta posterior per cell: Beta(α, β) over P(hazard)
-alpha = np.ones((GRID_SIZE, GRID_SIZE), dtype=np.float32)  # success counts
-beta = np.ones((GRID_SIZE, GRID_SIZE), dtype=np.float32)   # failure counts
+# Maps
+# 0=Boring, 1=Interesting
+interest_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+# 0=Unseen, 1=Seen
+seen_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+# Glow map (Transient prediction)
+glow_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
-# Observation metadata
-seen = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)     # 0/1 mask
-last_obs_time = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)  # timestamp
-
-# Gaussian kernel for spatial risk diffusion (white glow)
-# 5×5 Gaussian (σ ≈ 1.0)
-K_GLOW = np.array([
-    [1,  4,  7,  4, 1],
-    [4, 16, 26, 16, 4],
-    [7, 26, 41, 26, 7],
-    [4, 16, 26, 16, 4],
-    [1,  4,  7,  4, 1]
-], dtype=np.float32)
-K_GLOW /= K_GLOW.sum()
+# Robot State
+current_yaw = 0.0 # radians
 
 # ============================================================================
-# BAYESIAN MAPPING UTILITIES
-# ============================================================================
-
-def hazard_mean():
-    """Posterior mean μ = α/(α+β) ∈ [0,1]"""
-    return alpha / (alpha + beta)
-
-def hazard_entropy(mu):
-    """Shannon entropy H(μ) = -μ log μ - (1-μ) log(1-μ)"""
-    eps = 1e-6
-    mu_safe = np.clip(mu, eps, 1 - eps)
-    return -(mu_safe * np.log(mu_safe) + (1 - mu_safe) * np.log(1 - mu_safe))
-
-def conv2d_manual(a, kernel):
-    """Fast 2D convolution without scipy (reflect padding)"""
-    pad = kernel.shape[0] // 2
-    a_padded = np.pad(a, pad, mode='reflect')
-    out = np.zeros_like(a)
-    kh, kw = kernel.shape
-    for i in range(a.shape[0]):
-        for j in range(a.shape[1]):
-            out[i, j] = np.sum(a_padded[i:i+kh, j:j+kw] * kernel)
-    return out
-
-def white_glow(mu, seen_mask):
-    """
-    Predicted hazard value in UNSEEN cells via Gaussian spatial prior.
-
-    Intuition: Hazards have spatial extent. Convolve observed hazard mean
-    with Gaussian kernel, then mask to only unseen cells → "white glow"
-    showing where we predict value might be lurking.
-
-    Returns: array same shape as mu, nonzero only in unseen cells
-    """
-    convolved = conv2d_manual(mu, K_GLOW)
-    return convolved * (1 - seen_mask)  # zero out seen cells
-
-def bayes_update(cell_scores, current_time):
-    """
-    Bayesian update: incorporate VLM-style observations into Beta posterior.
-
-    Args:
-        cell_scores: dict[(gy, gx) -> (s, w)]
-            s: hazard score ∈ [0,1] (from VLM or stub)
-            w: confidence weight (range-dependent)
-        current_time: simulation time (seconds)
-
-    Updates global arrays: alpha, beta, seen, last_obs_time
-    """
-    global alpha, beta, seen, last_obs_time
-
-    for (gy, gx), (s, w) in cell_scores.items():
-        # Staleness gating: reduce weight if cell updated very recently
-        time_since_last = current_time - last_obs_time[gy, gx]
-        if time_since_last < STALENESS_THRESHOLD:
-            w *= 0.3  # debounce rapid updates
-
-        # Beta-Bernoulli conjugate update
-        alpha[gy, gx] += w * s
-        beta[gy, gx] += w * (1 - s)
-
-        # Mark as observed
-        seen[gy, gx] = 1
-        last_obs_time[gy, gx] = current_time
-
-# ============================================================================
-# PERCEPTION: VLM-STYLE HAZARD SCORING
+# MAPPING UTILITIES
 # ============================================================================
 
 def world_to_grid(world_xy):
-    """Convert world coordinates (meters) to grid indices"""
     gx = int(world_xy[0] / CELL_SIZE + GRID_SIZE / 2)
     gy = int(world_xy[1] / CELL_SIZE + GRID_SIZE / 2)
     return np.clip([gy, gx], 0, GRID_SIZE - 1)
 
 def grid_to_world(grid_yx):
-    """Convert grid indices to world coordinates (meters)"""
     gy, gx = grid_yx
     wx = (gx - GRID_SIZE / 2) * CELL_SIZE
     wy = (gy - GRID_SIZE / 2) * CELL_SIZE
     return np.array([wx, wy])
 
-def fov_cells(robot_pos, robot_heading_rad):
-    """
-    Project camera FOV onto grid cells.
-
-    Returns: list of (gy, gx, range_meters) within robot's field of view
-    """
-    cells = []
-    angles = np.linspace(-np.radians(FOV_DEGREES/2),
-                         np.radians(FOV_DEGREES/2),
-                         FOV_RAYS)
-
+def get_fov_mask(robot_pos, heading, fov_deg, max_range):
+    """Returns a list of (gy, gx) cells in the current FOV."""
+    cells = set()
+    
+    # Ray casting
+    angles = np.linspace(-np.radians(fov_deg/2), np.radians(fov_deg/2), FOV_RAYS)
     for angle_offset in angles:
-        ray_angle = robot_heading_rad + angle_offset
-        # Cast ray from robot position
-        r = CELL_SIZE  # start at first cell
-        while r <= MAX_RANGE:
+        ray_angle = heading + angle_offset
+        for r in np.arange(0.5, max_range, CELL_SIZE/2):
             x = robot_pos[0] + r * np.cos(ray_angle)
             y = robot_pos[1] + r * np.sin(ray_angle)
             gy, gx = world_to_grid([x, y])
-
             if 0 <= gy < GRID_SIZE and 0 <= gx < GRID_SIZE:
-                cells.append((gy, gx, r))
-            r += CELL_SIZE
+                cells.add((gy, gx))
+                
+    return list(cells)
 
-    # Deduplicate cells (same cell hit by multiple rays)
-    seen_cells = {}
-    for gy, gx, r in cells:
-        key = (gy, gx)
-        if key not in seen_cells or r < seen_cells[key]:
-            seen_cells[key] = r
-
-    return [(gy, gx, r) for (gy, gx), r in seen_cells.items()]
-
-def hazard_score_stub(world_xy, hazard_locations):
-    """
-    Fast deterministic hazard scorer (stub for VLM).
-
-    Returns high score (1.0) near known hazard locations,
-    low ambient score (0.1) elsewhere.
-    """
-    min_dist = float('inf')
-    for hazard_pos in hazard_locations:
-        dist = np.linalg.norm(world_xy - hazard_pos[:2])  # x, y only
-        min_dist = min(min_dist, dist)
-
-    if min_dist < 1.5:  # within 1.5m of hazard
-        return 1.0
-    return 0.1  # ambient/background risk
-
-def hazard_score_vlm(image_crop):
-    """
-    Real VLM hazard scorer (HTTP API).
-
-    Sends image to VLM endpoint, gets hazard score ∈ [0,1].
-    Prompt: "Rate hazard (chemical canister OR liquid spill) from 0-1."
-    """
-    try:
-        import requests
-        from io import BytesIO
-        from PIL import Image
-
-        # Convert numpy array to JPEG
-        img = Image.fromarray(image_crop)
-        buf = BytesIO()
-        img.save(buf, format='JPEG', quality=85)
-        buf.seek(0)
-
-        response = requests.post(
-            VLM_ENDPOINT,
-            files={'image': buf},
-            data={'prompt': 'Rate hazard relevant to chemical canister OR liquid spill from 0 to 1. Return just a number.'},
-            timeout=3.0
-        )
-
-        if response.status_code == 200:
-            return float(response.json()['score'])
+def update_map(fov_cells, interest_score):
+    """Update the semantic map with the VLM's interest score."""
+    global interest_map, seen_map
+    
+    for gy, gx in fov_cells:
+        # Simple update: weighted average or max
+        # Here we trust the latest VLM score but decay it slightly over distance?
+        # For simplicity: Max aggregation (if we saw it was interesting once, it stays interesting)
+        # But we also need to handle "Boring" updates overwriting "Unknown".
+        
+        # If previously unseen, take the value.
+        # If seen, average it?
+        if seen_map[gy, gx] == 0:
+            interest_map[gy, gx] = interest_score
         else:
-            print(f"VLM API error: {response.status_code}")
-            return 0.1
-    except Exception as e:
-        print(f"VLM error: {e}, falling back to stub")
-        return 0.1
+            # Moving average
+            interest_map[gy, gx] = 0.7 * interest_map[gy, gx] + 0.3 * interest_score
+            
+        seen_map[gy, gx] = 1.0
 
-def score_fov_cells(fov_cell_list, robot_pos, hazard_locations, camera_image=None):
+def project_glow(robot_pos, current_heading, lead_direction):
     """
-    Score all cells in FOV with hazard likelihood.
-
-    Args:
-        fov_cell_list: list of (gy, gx, range)
-        robot_pos: robot world position
-        hazard_locations: list of hazard positions (for stub)
-        camera_image: optional RGB image (for real VLM)
-
-    Returns: dict[(gy, gx) -> (s, w)]
-        s: hazard score ∈ [0,1]
-        w: confidence weight (range-decayed)
+    Project 'White Glow' (Predicted Interest) based on Visual Continuity.
+    
+    If lead_direction is 'left', project a cone to the left of the current FOV.
     """
-    scores = {}
+    global glow_map
+    
+    # Decay old glow
+    glow_map *= 0.5 
+    
+    if lead_direction == 'none' or lead_direction == 'center':
+        return
 
-    # If using real VLM, score the whole image once
-    if USE_REAL_VLM and camera_image is not None:
-        global_score = hazard_score_vlm(camera_image)
-    else:
-        global_score = None
-
-    for gy, gx, r in fov_cell_list:
-        world_xy = grid_to_world((gy, gx))
-
-        # Get hazard score
-        if global_score is not None:
-            s = global_score  # use VLM score for all visible cells
-        else:
-            s = hazard_score_stub(world_xy, hazard_locations)
-
-        # Confidence decays with range
-        w = np.exp(-CONFIDENCE_DECAY * r)
-
-        scores[(gy, gx)] = (s, w)
-
-    return scores
+    # Determine angle of projection
+    # Left means: Current Heading + FOV/2 + Offset
+    angle_offset = 0
+    if lead_direction == 'left':
+        angle_offset = np.radians(FOV_DEGREES/2 + 20) # Look 20 deg past the edge
+    elif lead_direction == 'right':
+        angle_offset = -np.radians(FOV_DEGREES/2 + 20)
+        
+    target_angle = current_heading + angle_offset
+    
+    # Project a "Cone of Curiosity"
+    # We use the same raycasting logic but write to glow_map
+    # The cone is wider and fuzzier
+    cone_width = 40 # degrees
+    angles = np.linspace(-np.radians(cone_width/2), np.radians(cone_width/2), 20)
+    
+    for ang in angles:
+        ray_angle = target_angle + ang
+        for r in np.arange(1.0, MAX_RANGE * 0.8, CELL_SIZE):
+            x = robot_pos[0] + r * np.cos(ray_angle)
+            y = robot_pos[1] + r * np.sin(ray_angle)
+            gy, gx = world_to_grid([x, y])
+            
+            if 0 <= gy < GRID_SIZE and 0 <= gx < GRID_SIZE:
+                # Only glow in UNSEEN areas
+                if seen_map[gy, gx] < 0.5:
+                    # Glow intensity fades with distance
+                    intensity = 1.0 * (1 - r/MAX_RANGE)
+                    glow_map[gy, gx] = max(glow_map[gy, gx], intensity)
 
 # ============================================================================
-# PLANNING: UTILITY-BASED WAYPOINT SELECTION
+# PLANNING: NEXT BEST VIEW
 # ============================================================================
 
-def candidate_waypoints(robot_grid_yx, step_cells=2):
+def calculate_view_utility(robot_pos, candidate_heading):
     """
-    Generate candidate waypoints in 8 directions around robot.
-
-    Args:
-        robot_grid_yx: (gy, gx) current position
-        step_cells: distance in grid cells
-
-    Returns: list of (gy, gx) candidates
+    Evaluate how good looking in a specific direction would be.
+    Utility = Sum(Unseen * Entropy) + Sum(Glow) + Sum(Known Interest)
     """
-    gy, gx = robot_grid_yx
-    candidates = []
+    # Get cells in this candidate view
+    cells = get_fov_mask(robot_pos, candidate_heading, FOV_DEGREES, MAX_RANGE)
+    
+    u_entropy = 0
+    u_glow = 0
+    u_interest = 0
+    
+    for gy, gx in cells:
+        is_seen = seen_map[gy, gx]
+        
+        # Entropy: High if unseen
+        if not is_seen:
+            u_entropy += 1.0
+            
+        # Glow: High if we predicted something there
+        u_glow += glow_map[gy, gx]
+        
+        # Interest: Re-looking at interesting things (confirmation)
+        # or looking near interesting things.
+        # For now, let's say we want to discover NEW things, so we don't reward
+        # looking at known interesting things too much, unless we want to track them.
+        # Let's focus on Exploration + Glow.
+        
+    # Normalize by number of cells to get average utility per pixel
+    if len(cells) == 0: return 0
+    
+    total_score = (LAMBDA_ENTROPY * u_entropy) + (LAMBDA_GLOW * u_glow)
+    return total_score
 
-    for dy in [-step_cells, 0, step_cells]:
-        for dx in [-step_cells, 0, step_cells]:
-            if dy == 0 and dx == 0:
-                continue
-            ny, nx = gy + dy, gx + dx
-            if 0 <= ny < GRID_SIZE and 0 <= nx < GRID_SIZE:
-                candidates.append((ny, nx))
-
-    return candidates
-
-def utility_at_waypoint(waypoint_yx, robot_yx, mu, entropy, glow):
-    """
-    Compute utility U(x) at candidate waypoint.
-
-    U = λ₁·max_hazard + λ₂·max_entropy + λ₃·max_glow - λ₄·path_cost
-
-    Intuition: high value if nearby cells have high hazard (exploitation),
-    high uncertainty (exploration), or high predicted unseen value (active sensing).
-    """
-    wy, wx = waypoint_yx
-
-    # Extract 3×3 neighborhood around waypoint
-    y0, y1 = max(0, wy-1), min(GRID_SIZE, wy+2)
-    x0, x1 = max(0, wx-1), min(GRID_SIZE, wx+2)
-
-    patch_mu = mu[y0:y1, x0:x1]
-    patch_H = entropy[y0:y1, x0:x1]
-    patch_glow = glow[y0:y1, x0:x1]
-
-    # Compute value terms
-    val_hazard = LAMBDA_HAZARD * np.max(patch_mu) if patch_mu.size > 0 else 0
-    val_entropy = LAMBDA_ENTROPY * np.max(patch_H) if patch_H.size > 0 else 0
-    val_glow = LAMBDA_GLOW * np.max(patch_glow) if patch_glow.size > 0 else 0
-
-    # Ablation support
-    if ABLATION_MODE == 'hazard_only':
-        val_entropy = 0
-        val_glow = 0
-    elif ABLATION_MODE == 'entropy_only':
-        val_hazard = 0
-        val_glow = 0
-
-    # Path cost (Euclidean distance)
-    path_cost = LAMBDA_PATH * np.linalg.norm(np.array(waypoint_yx) - np.array(robot_yx))
-
-    return val_hazard + val_entropy + val_glow - path_cost
-
-def choose_waypoint(robot_grid_yx, mu, entropy, glow):
-    """
-    Select best waypoint via utility maximization.
-
-    Returns: (best_waypoint_yx, best_utility)
-    """
-    candidates = candidate_waypoints(robot_grid_yx, step_cells=2)
-
-    best_wp = robot_grid_yx
-    best_U = -1e9
-
-    for wp in candidates:
-        U = utility_at_waypoint(wp, robot_grid_yx, mu, entropy, glow)
-        if U > best_U:
-            best_U = U
-            best_wp = wp
-
-    return best_wp, best_U
+def choose_next_angle(robot_pos, current_heading):
+    """Scan 360 degrees and pick the best angle."""
+    best_angle = current_heading
+    best_score = -1e9
+    
+    # Check 8 directions (every 45 degrees)
+    # Also check current direction to see if we should stay? 
+    # Usually we want to move.
+    
+    candidates = np.linspace(0, 2*np.pi, 16, endpoint=False) # 16 directions
+    
+    scores = []
+    
+    for ang in candidates:
+        # Penalize large rotations (saccade cost)
+        # diff = abs(ang - current_heading)
+        # diff = min(diff, 2*np.pi - diff)
+        # cost = diff * SACCADE_COST
+        cost = 0 # For now, instant rotation
+        
+        score = calculate_view_utility(robot_pos, ang) - cost
+        scores.append(score)
+        
+        if score > best_score:
+            best_score = score
+            best_angle = ang
+            
+    return best_angle, scores, candidates
 
 # ============================================================================
-# PYBULLET SIMULATION ENVIRONMENT
+# PYBULLET ENV
 # ============================================================================
 
-def setup_pybullet_env():
-    """Initialize PyBullet simulation with warehouse-like environment"""
-    # Connect to physics server
-    physics_client = p.connect(p.GUI)
+def setup_env():
+    p.connect(p.GUI)
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
-    p.setGravity(0, 0, -10)
-
-    # Load ground plane with concrete texture
-    plane_id = p.loadURDF("plane.urdf")
-    p.changeVisualShape(plane_id, -1, rgbaColor=[0.5, 0.5, 0.5, 1])
-
-    # Create warehouse walls with industrial look
-    wall_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.15, 10, 2])
-    wall_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.15, 10, 2],
-                                      rgbaColor=[0.4, 0.4, 0.45, 1])
-
-    p.createMultiBody(0, wall_shape, wall_visual, [10, 0, 2])   # +X wall
-    p.createMultiBody(0, wall_shape, wall_visual, [-10, 0, 2])  # -X wall
-
-    wall_shape2 = p.createCollisionShape(p.GEOM_BOX, halfExtents=[10, 0.15, 2])
-    wall_visual2 = p.createVisualShape(p.GEOM_BOX, halfExtents=[10, 0.15, 2],
-                                       rgbaColor=[0.4, 0.4, 0.45, 1])
-
-    p.createMultiBody(0, wall_shape2, wall_visual2, [0, 10, 2])   # +Y wall
-    p.createMultiBody(0, wall_shape2, wall_visual2, [0, -10, 2])  # -Y wall
-
-    # Add some warehouse props (shelves, pallets)
-    create_warehouse_props()
-
-    return physics_client
-
-def create_warehouse_props():
-    """Create warehouse environment props (shelves, pallets, crates)"""
-
-    # Wooden pallets
-    pallet_positions = [
-        [-8, -7, 0.1],
-        [8, -7, 0.1],
-        [-8, 8, 0.1],
-        [7, 8, 0.1]
-    ]
-
-    for pos in pallet_positions:
-        # Pallet base
-        pallet_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.6, 0.8, 0.08])
-        pallet_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.6, 0.8, 0.08],
-                                           rgbaColor=[0.6, 0.4, 0.2, 1])
-        p.createMultiBody(10.0, pallet_shape, pallet_visual, pos)
-
-        # Crate on top
-        crate_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.4])
-        crate_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.4],
-                                          rgbaColor=[0.5, 0.35, 0.2, 1])
-        crate_pos = [pos[0], pos[1], pos[2] + 0.5]
-        p.createMultiBody(5.0, crate_shape, crate_visual, crate_pos)
-
-    # Industrial shelving units
-    shelf_positions = [
-        [-9, 0, 1.0],
-        [9, 0, 1.0]
-    ]
-
-    for pos in shelf_positions:
-        # Vertical posts
-        post_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.05, 0.05, 1.0])
-        post_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.05, 0.05, 1.0],
-                                         rgbaColor=[0.3, 0.3, 0.3, 1])
-
-        for offset_y in [-1.0, 1.0]:
-            post_pos = [pos[0], pos[1] + offset_y, pos[2]]
-            p.createMultiBody(0, post_shape, post_visual, post_pos)
-
-        # Horizontal shelves
-        shelf_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 1.0, 0.02])
-        shelf_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.1, 1.0, 0.02],
-                                          rgbaColor=[0.35, 0.35, 0.35, 1])
-
-        for shelf_height in [0.5, 1.0, 1.5]:
-            shelf_pos = [pos[0], pos[1], shelf_height]
-            p.createMultiBody(0, shelf_shape, shelf_visual, shelf_pos)
-
-def create_r2d2_robot(start_pos):
-    """
-    Create simple R2D2-style differential drive robot using MultiBody links.
-
-    Returns: robot_id
-    """
-    # Body (cylinder)
-    body_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.3, height=0.8)
-    body_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.3, length=0.8,
-                                      rgbaColor=[0.8, 0.8, 0.9, 1])
-
-    # Wheel shapes
-    wheel_radius = 0.15
-    wheel_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=wheel_radius, height=0.05)
-    wheel_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=wheel_radius, length=0.05,
-                                       rgbaColor=[0.2, 0.2, 0.2, 1])
-
-    # Link definitions for 2 wheels
-    link_masses = [1.0, 1.0]
-    link_collision_shapes = [wheel_shape, wheel_shape]
-    link_visual_shapes = [wheel_visual, wheel_visual]
+    p.setGravity(0, 0, -9.8)
     
-    # Position relative to parent (chassis)
-    # Chassis center is at z=0.4. Wheel center at z=0.15. Diff z = -0.25.
-    link_positions = [
-        [0, 0.35, -0.25],  # Left
-        [0, -0.35, -0.25]  # Right
-    ]
+    # Room
+    p.loadURDF("plane.urdf")
+    # Walls
+    p.loadURDF("cube.urdf", [10, 0, 1], globalScaling=10)
+    p.loadURDF("cube.urdf", [-10, 0, 1], globalScaling=10)
+    p.loadURDF("cube.urdf", [0, 10, 1], globalScaling=10)
+    p.loadURDF("cube.urdf", [0, -10, 1], globalScaling=10)
     
-    # Orientation: Rotate 90 deg around X to make cylinder roll
-    quat = p.getQuaternionFromEuler([np.pi/2, 0, 0])
-    link_orientations = [quat, quat]
-    
-    link_inertial_frame_pos = [[0,0,0], [0,0,0]]
-    link_inertial_frame_orn = [[0,0,0,1], [0,0,0,1]]
-    
-    link_parent_indices = [0, 0] # Both attached to base
-    link_joint_types = [p.JOINT_REVOLUTE, p.JOINT_REVOLUTE]
-    link_joint_axis = [[0,0,1], [0,0,1]] # Rotate around Z of the link
+    # === INTERESTING ZONE (Right) ===
+    # Cluttered shelves, boxes, red canisters
+    for i in range(5):
+        p.loadURDF("cube.urdf", [6 + np.random.uniform(-1,1), 
+                                 -5 + i*2 + np.random.uniform(-0.5,0.5), 0.5], 
+                   globalScaling=0.8)
+        
+    # A "Trail" of small objects leading to the clutter
+    for i in range(5):
+        p.loadURDF("duck_vhacd.urdf", [2 + i, -5 + i*0.5, 0.5], globalScaling=3.0)
 
-    robot_id = p.createMultiBody(
-        baseMass=5.0,
-        baseCollisionShapeIndex=body_shape,
-        baseVisualShapeIndex=body_visual,
-        basePosition=[start_pos[0], start_pos[1], 0.4],
-        linkMasses=link_masses,
-        linkCollisionShapeIndices=link_collision_shapes,
-        linkVisualShapeIndices=link_visual_shapes,
-        linkPositions=link_positions,
-        linkOrientations=link_orientations,
-        linkInertialFramePositions=link_inertial_frame_pos,
-        linkInertialFrameOrientations=link_inertial_frame_orn,
-        linkParentIndices=link_parent_indices,
-        linkJointTypes=link_joint_types,
-        linkJointAxis=link_joint_axis
-    )
-
+    # === BORING ZONE (Left) ===
+    # Empty
+    
+    # Robot (Fixed Base)
+    robot_id = p.loadURDF("r2d2.urdf", [0, 0, 0.5])
     return robot_id
 
-def create_hazard_objects():
-    """
-    Create realistic hazard objects (chemical barrels, spills, warning signs).
-
-    Returns: list of (x, y, z) positions
-    """
-    hazards = []
-
-    # === CHEMICAL BARRELS (55-gallon drums) ===
-    # Single barrels with warning markings
-    single_barrel_positions = [
-        [5, 5, 0.45],
-        [-3, 7, 0.45]
-    ]
-
-    for pos in single_barrel_positions:
-        # Main barrel body (red with yellow stripe)
-        barrel_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.3, height=0.9)
-        barrel_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.3, length=0.9,
-                                           rgbaColor=[0.85, 0.1, 0.05, 1])  # Bright red
-        barrel_id = p.createMultiBody(15.0, barrel_shape, barrel_visual, pos)
-
-        # Yellow warning stripe (top ring)
-        stripe_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.32, length=0.15,
-                                           rgbaColor=[0.95, 0.85, 0.1, 1])  # Warning yellow
-        stripe_pos = [pos[0], pos[1], pos[2] + 0.35]
-        p.createMultiBody(0, -1, stripe_visual, stripe_pos)
-
-        # Black hazard symbol (small cylinder on top)
-        symbol_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.08, length=0.02,
-                                           rgbaColor=[0.1, 0.1, 0.1, 1])
-        symbol_pos = [pos[0], pos[1], pos[2] + 0.46]
-        p.createMultiBody(0, -1, symbol_visual, symbol_pos)
-
-        hazards.append(pos)
-
-    # Stacked barrels (more dangerous - multiple hazards)
-    stacked_positions = [
-        [-5, -5],
-        [6, -4]
-    ]
-
-    for base_xy in stacked_positions:
-        # Bottom barrel
-        pos_bottom = [base_xy[0], base_xy[1], 0.45]
-        barrel_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.3, height=0.9)
-        barrel_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.3, length=0.9,
-                                           rgbaColor=[0.9, 0.15, 0.05, 1])
-        p.createMultiBody(15.0, barrel_shape, barrel_visual, pos_bottom)
-
-        # Yellow stripe
-        stripe_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.32, length=0.15,
-                                           rgbaColor=[0.95, 0.85, 0.1, 1])
-        p.createMultiBody(0, -1, stripe_visual, [pos_bottom[0], pos_bottom[1], pos_bottom[2] + 0.35])
-
-        # Top barrel (offset for realism)
-        offset_x = 0.1 if base_xy[0] > 0 else -0.1
-        pos_top = [base_xy[0] + offset_x, base_xy[1], 0.45 + 0.9]
-        barrel_visual2 = p.createVisualShape(p.GEOM_CYLINDER, radius=0.3, length=0.9,
-                                            rgbaColor=[0.85, 0.12, 0.08, 1])
-        p.createMultiBody(15.0, barrel_shape, barrel_visual2, pos_top)
-
-        # Stripe on top barrel
-        p.createMultiBody(0, -1, stripe_visual, [pos_top[0], pos_top[1], pos_top[2] + 0.35])
-
-        hazards.append(pos_bottom)
-        hazards.append(pos_top)
-
-    # === LIQUID SPILLS ===
-    # Large irregular spill (multiple overlapping puddles)
-    spill_center_1 = [3, -6]
-    create_realistic_spill(spill_center_1, num_puddles=8, color=[0.7, 0.05, 0.0, 0.85])
-    hazards.append([spill_center_1[0], spill_center_1[1], 0.01])
-
-    # Medium spill near leaking barrel
-    spill_center_2 = [-7, 2]
-    create_realistic_spill(spill_center_2, num_puddles=5, color=[0.8, 0.1, 0.0, 0.9])
-    hazards.append([spill_center_2[0], spill_center_2[1], 0.01])
-
-    # === WARNING SIGNS ===
-    # Place warning signs near major hazards
-    sign_positions = [
-        [5.8, 5.8, 0.5],    # Near single barrel
-        [-5.8, -4.5, 0.5],  # Near stacked barrels
-        [3.5, -5.5, 0.5]    # Near large spill
-    ]
-
-    for pos in sign_positions:
-        # Yellow warning sign (triangle)
-        sign_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.02, 0.3, 0.3])
-        sign_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.02, 0.3, 0.3],
-                                         rgbaColor=[0.95, 0.8, 0.1, 1])
-        p.createMultiBody(0, sign_shape, sign_visual, pos)
-
-        # Red exclamation mark
-        mark_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.03, 0.05, 0.15],
-                                         rgbaColor=[0.9, 0.0, 0.0, 1])
-        p.createMultiBody(0, -1, mark_visual, [pos[0], pos[1], pos[2] + 0.05])
-
-    return hazards
-
-def create_realistic_spill(center_xy, num_puddles=6, color=[0.7, 0.0, 0.0, 0.8]):
-    """
-    Create an irregular spill using multiple overlapping puddles.
-
-    Args:
-        center_xy: [x, y] center of spill
-        num_puddles: number of overlapping puddles for irregular shape
-        color: RGBA color
-    """
-    for i in range(num_puddles):
-        # Random offset from center
-        angle = (i / num_puddles) * 2 * np.pi + np.random.uniform(-0.3, 0.3)
-        radius = np.random.uniform(0.3, 0.8)
-        offset_x = radius * np.cos(angle)
-        offset_y = radius * np.sin(angle)
-
-        # Puddle position
-        pos = [center_xy[0] + offset_x, center_xy[1] + offset_y, 0.005]
-
-        # Elliptical puddle
-        size_x = np.random.uniform(0.4, 0.7)
-        size_y = np.random.uniform(0.4, 0.7)
-
-        puddle_shape = p.createCollisionShape(p.GEOM_BOX,
-                                             halfExtents=[size_x, size_y, 0.005])
-        puddle_visual = p.createVisualShape(p.GEOM_BOX,
-                                           halfExtents=[size_x, size_y, 0.005],
-                                           rgbaColor=color)
-        p.createMultiBody(0, puddle_shape, puddle_visual, pos)
-
-def get_robot_state(robot_id):
-    """
-    Get robot position and heading.
-
-    Returns: (pos_xy, heading_rad)
-    """
-    pos, orn = p.getBasePositionAndOrientation(robot_id)
-
-    # Extract yaw from quaternion
-    euler = p.getEulerFromQuaternion(orn)
-    heading = euler[2]  # yaw
-
-    return np.array([pos[0], pos[1]]), heading
-
-def set_wheel_velocities(robot_id, v_left, v_right):
-    """
-    Control robot via differential drive (velocity-based).
-
-    Simple approximation: apply forces to base to simulate wheel motion.
-    """
-    # Get current state
-    pos, heading = get_robot_state(robot_id)
-
-    # Compute average velocity and turn rate
-    v = (v_left + v_right) / 2.0
-    omega = (v_right - v_left) / 0.7  # 0.7m wheelbase
-
-    # Compute velocity in world frame
-    vx = v * np.cos(heading)
-    vy = v * np.sin(heading)
-
-    # Apply velocity (simplified: just set linear/angular velocity)
-    p.resetBaseVelocity(robot_id, [vx, vy, 0], [0, 0, omega])
-
-def navigate_to_waypoint(robot_id, goal_world_xy):
-    """
-    Simple proportional controller to navigate toward waypoint.
-
-    Returns: (v_left, v_right) wheel velocities
-    """
-    pos, heading = get_robot_state(robot_id)
-
-    # Vector to goal
-    to_goal = goal_world_xy - pos
-    dist = np.linalg.norm(to_goal)
-
-    if dist < 0.5:  # close enough
-        return 0, 0
-
-    # Desired heading
-    desired_heading = np.arctan2(to_goal[1], to_goal[0])
-
-    # Heading error
-    heading_error = desired_heading - heading
-    # Normalize to [-π, π]
-    heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
-
-    # Proportional control
-    base_speed = 3.0
-    turn_gain = 2.0
-
-    v_left = base_speed - turn_gain * heading_error
-    v_right = base_speed + turn_gain * heading_error
-
-    # Clamp
-    v_left = np.clip(v_left, -5, 5)
-    v_right = np.clip(v_right, -5, 5)
-
-    return v_left, v_right
+def get_camera_image(robot_id, yaw):
+    """Render camera view from robot head."""
+    # R2D2 head is roughly at z=0.8
+    pos = [0, 0, 0.8]
+    
+    # Target
+    tx = pos[0] + 2 * np.cos(yaw)
+    ty = pos[1] + 2 * np.sin(yaw)
+    tz = pos[2] - 0.2 # Look slightly down
+    
+    view_matrix = p.computeViewMatrix(pos, [tx, ty, tz], [0, 0, 1])
+    proj_matrix = p.computeProjectionMatrixFOV(FOV_DEGREES, 1.0, 0.1, 20.0)
+    
+    w, h, rgb, _, _ = p.getCameraImage(320, 320, view_matrix, proj_matrix)
+    rgb = np.array(rgb, dtype=np.uint8).reshape((h, w, 4))
+    return rgb[:, :, :3] # Drop alpha
 
 # ============================================================================
-# VISUALIZATION: 2×2 MISSION CONTROL DASHBOARD
-# ============================================================================
-
-def setup_dashboard():
-    """Create 2×2 matplotlib dashboard"""
-    plt.ion()
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('Semantix: Mission Control - Semantic Uncertainty Engine',
-                 fontsize=16, fontweight='bold')
-
-    # Configure each subplot
-    titles = [
-        'Visited Map',
-        'Hazard Posterior μ',
-        'Semantic Entropy H(μ)',
-        'Utility & Action'
-    ]
-
-    for ax, title in zip(axes.flat, titles):
-        ax.set_title(title, fontweight='bold')
-        ax.set_aspect('equal')
-        ax.set_xlim(0, GRID_SIZE)
-        ax.set_ylim(0, GRID_SIZE)
-
-    # Create image artists
-    images = []
-    for ax in axes.flat:
-        im = ax.imshow(np.zeros((GRID_SIZE, GRID_SIZE)),
-                       origin='lower', cmap='gray', vmin=0, vmax=1)
-        images.append(im)
-
-    # Custom colormaps
-    images[1].set_cmap('RdYlBu_r')  # Hazard: blue → red
-    images[2].set_cmap('Greys')      # Entropy: dark → white
-    images[3].set_cmap('hot')        # Utility: black → white → yellow
-
-    # Add colorbars
-    for ax, im in zip(axes.flat, images):
-        plt.colorbar(im, ax=ax, fraction=0.046)
-
-    plt.tight_layout()
-
-    return fig, axes, images
-
-def update_dashboard(axes, images, mu, entropy, glow, robot_grid_yx, waypoint_grid_yx, current_time, metrics):
-    """Update all 4 panels of the dashboard"""
-
-    # Panel 1: Visited map
-    images[0].set_data(seen)
-    images[0].set_clim(0, 1)
-
-    # Panel 2: Hazard posterior
-    images[1].set_data(mu)
-    images[1].set_clim(0, 1)
-
-    # Panel 3: Entropy
-    images[2].set_data(entropy)
-    images[2].set_clim(0, np.log(2))  # max entropy of Bernoulli
-
-    # Panel 4: Utility (show glow for visualization)
-    # Combine mu and glow for dramatic effect
-    utility_vis = mu + glow
-    images[3].set_data(utility_vis)
-    images[3].set_clim(0, 1.5)
-
-    # Clear previous markers
-    for ax in axes.flat:
-        for artist in ax.patches[:]:
-            artist.remove()
-        for artist in ax.texts[:]:
-            artist.remove()
-
-    # Add robot position marker (all panels)
-    for ax in axes.flat:
-        circle = Circle((robot_grid_yx[1], robot_grid_yx[0]), radius=1.5,
-                       color='lime', fill=False, linewidth=2, label='Scout')
-        ax.add_patch(circle)
-
-    # Add waypoint marker and arrow (panel 4 only)
-    if waypoint_grid_yx is not None:
-        ax_util = axes[1, 1]
-
-        # Waypoint marker
-        circle = Circle((waypoint_grid_yx[1], waypoint_grid_yx[0]), radius=1.0,
-                       color='cyan', fill=True, alpha=0.7, label='Target')
-        ax_util.add_patch(circle)
-
-        # Arrow from robot to waypoint
-        dy = waypoint_grid_yx[0] - robot_grid_yx[0]
-        dx = waypoint_grid_yx[1] - robot_grid_yx[1]
-        if abs(dx) > 0.1 or abs(dy) > 0.1:
-            arrow = FancyArrow(robot_grid_yx[1], robot_grid_yx[0],
-                              dx * 0.7, dy * 0.7,
-                              width=0.5, head_width=2, head_length=1.5,
-                              color='yellow', alpha=0.8)
-            ax_util.add_patch(arrow)
-
-    # Add metrics text overlay (top-left corner of panel 1)
-    ax_visited = axes[0, 0]
-    metrics_text = (
-        f"Time: {current_time:.1f}s\n"
-        f"Coverage: {metrics['coverage']:.1f}%\n"
-        f"Frames: {metrics['frames']}\n"
-        f"Avg Hazard: {metrics['avg_hazard']:.3f}\n"
-        f"Avg Entropy: {metrics['avg_entropy']:.3f}\n"
-        f"Mode: {ABLATION_MODE}"
-    )
-    ax_visited.text(2, GRID_SIZE - 2, metrics_text,
-                   fontsize=9, verticalalignment='top',
-                   bbox=dict(boxstyle='round', facecolor='black', alpha=0.7),
-                   color='white', family='monospace')
-
-    plt.pause(0.001)
-
-# ============================================================================
-# MAIN CONTROL LOOP
+# MAIN LOOP
 # ============================================================================
 
 def main():
-    global ABLATION_MODE
-
-    print("=" * 70)
-    print("Semantix: Research-Grade Proactive Hazard Scout")
-    print("=" * 70)
-    print("Features:")
-    print("  • VLM-style hazard perception (Language-as-Cost)")
-    print("  • Bayesian semantic mapping with Beta posteriors")
-    print("  • Semantic entropy for epistemic uncertainty")
-    print("  • White-glow prediction for unseen value")
-    print("  • Event-triggered replanning (5s frame period, 0.2 Hz)")
-    print("=" * 70)
-    print(f"Using {'REAL VLM' if USE_REAL_VLM else 'STUB SCORER'} for hazard detection")
-    print("=" * 70)
-    print("\nKeyboard controls:")
-    print("  1: Ablation mode = hazard_only")
-    print("  2: Ablation mode = entropy_only")
-    print("  3: Ablation mode = full (default)")
-    print("  Q: Quit")
-    print("=" * 70)
-
-    # Setup PyBullet
-    physics_client = setup_pybullet_env()
-
-    # Create robot (start at origin)
-    start_pos = [0, 0]
-    robot_id = create_r2d2_robot(start_pos)
-
-    # Create hazards
-    hazard_locations = create_hazard_objects()
-    hazard_array = np.array(hazard_locations)
-
-    print(f"\nSpawned {len(hazard_locations)} hazard objects in warehouse")
-
-    # Setup visualization
-    fig, axes, images = setup_dashboard()
-
-    # Initialize control state
-    last_frame_time = -FRAME_PERIOD  # trigger immediately
-    current_waypoint = None
-    frame_count = 0
-
-    # Metrics
-    metrics = {
-        'coverage': 0,
-        'frames': 0,
-        'avg_hazard': 0,
-        'avg_entropy': 0
-    }
-
-    # Simulation loop
-    sim_time = 0.0
-    dt = 1.0 / 240.0  # PyBullet default timestep
+    global current_yaw
+    
+    robot_id = setup_env()
+    
+    # Dashboard
+    plt.ion()
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    ax_map = axes[0]
+    ax_glow = axes[1]
+    ax_cam = axes[2]
+    
+    ax_map.set_title("Semantic Interest Map")
+    ax_glow.set_title("Predictive Glow (Curiosity)")
+    ax_cam.set_title("Robot Vision")
+    
+    img_map = ax_map.imshow(interest_map, vmin=0, vmax=1, cmap='magma', origin='lower')
+    img_glow = ax_glow.imshow(glow_map, vmin=0, vmax=1, cmap='Blues', origin='lower')
+    img_cam = ax_cam.imshow(np.zeros((320, 320, 3)))
+    
+    print("PANOPTICON ACTIVATED. Scanning for Interest...")
+    
     step = 0
-
-    print("\nStarting simulation...")
-    print("Watch the Mission Control dashboard for real-time updates!\n")
-
     try:
         while True:
-            # Step physics
             p.stepSimulation()
-            sim_time = step * dt
+            
+            # Rotate robot visually
+            quat = p.getQuaternionFromEuler([0, 0, current_yaw])
+            p.resetBasePositionAndOrientation(robot_id, [0,0,0.5], quat)
+            
+            if step % 100 == 0: # Every ~5 seconds (at 20Hz sim speed for demo)
+                
+                # 1. Capture
+                rgb = get_camera_image(robot_id, current_yaw)
+                img_cam.set_data(rgb)
+                
+                # 2. Analyze (VLM)
+                print(f"Analyzing view at {math.degrees(current_yaw):.1f}°...")
+                analysis = vlm_client.analyze_scene(rgb)
+                
+                i_score = analysis.get('interest_score', 0.1)
+                lead = analysis.get('lead_direction', 'none')
+                print(f"  Interest: {i_score:.2f} | Lead: {lead}")
+                
+                # 3. Update Map
+                fov_cells = get_fov_mask([0,0], current_yaw, FOV_DEGREES, MAX_RANGE)
+                update_map(fov_cells, i_score)
+                
+                # 4. Project Glow (Curiosity)
+                project_glow([0,0], current_yaw, lead)
+                
+                # 5. Plan Next Saccade
+                next_yaw, scores, angles = choose_next_angle([0,0], current_yaw)
+                print(f"  Saccading to {math.degrees(next_yaw):.1f}° (Score: {max(scores):.2f})")
+                
+                current_yaw = next_yaw
+                
+                # Update Viz
+                # Overlay seen mask on interest map?
+                # For now just raw maps
+                img_map.set_data(interest_map)
+                img_glow.set_data(glow_map)
+                
+                # Draw robot FOV on map
+                for patch in ax_map.patches:
+                    patch.remove()
+                wedge = Wedge((GRID_SIZE/2, GRID_SIZE/2), MAX_RANGE/CELL_SIZE, 
+                              math.degrees(current_yaw) - FOV_DEGREES/2,
+                              math.degrees(current_yaw) + FOV_DEGREES/2,
+                              color='white', alpha=0.3)
+                ax_map.add_patch(wedge)
+                
+                fig.canvas.draw()
+                fig.canvas.flush_events()
+                
+            time.sleep(0.01)
             step += 1
-
-            # Get robot state
-            robot_pos, robot_heading = get_robot_state(robot_id)
-            robot_grid_yx = world_to_grid(robot_pos)
-
-            # ================================================================
-            # EVENT-TRIGGERED PERCEPTION & PLANNING (discrete vision)
-            # ================================================================
-            time_since_frame = sim_time - last_frame_time
-
-            if time_since_frame >= FRAME_PERIOD or current_waypoint is None:
-                # NEW FRAME ARRIVED! (0.2 Hz tick)
-                frame_count += 1
-                print(f"\n[Frame {frame_count}] t={sim_time:.1f}s | Robot @ {robot_pos}")
-
-                # 1. Project FOV onto grid
-                fov_cells_list = fov_cells(robot_pos, robot_heading)
-                print(f"  FOV: {len(fov_cells_list)} cells visible")
-
-                # 2. Score hazards (VLM or stub)
-                cell_scores = score_fov_cells(fov_cells_list, robot_pos, hazard_array)
-
-                # 3. Bayesian update
-                bayes_update(cell_scores, sim_time)
-
-                # 4. Compute derived maps
-                mu = hazard_mean()
-                H = hazard_entropy(mu)
-                glow = white_glow(mu, seen)
-
-                # 5. Choose next waypoint via utility maximization
-                current_waypoint, utility = choose_waypoint(robot_grid_yx, mu, H, glow)
-                waypoint_world = grid_to_world(current_waypoint)
-
-                print(f"  New waypoint: grid {current_waypoint} → world {waypoint_world}")
-                print(f"  Utility: {utility:.3f}")
-
-                # 6. Update metrics
-                metrics['coverage'] = 100 * np.sum(seen) / (GRID_SIZE ** 2)
-                metrics['frames'] = frame_count
-                metrics['avg_hazard'] = np.mean(mu[seen > 0]) if np.sum(seen) > 0 else 0
-                metrics['avg_entropy'] = np.mean(H[seen > 0]) if np.sum(seen) > 0 else 0
-
-                print(f"  Coverage: {metrics['coverage']:.1f}% | "
-                      f"Avg Hazard: {metrics['avg_hazard']:.3f} | "
-                      f"Avg Entropy: {metrics['avg_entropy']:.3f}")
-
-                # 7. Update dashboard
-                update_dashboard(axes, images, mu, H, glow,
-                               robot_grid_yx, current_waypoint,
-                               sim_time, metrics)
-
-                last_frame_time = sim_time
-
-            # ================================================================
-            # CONTINUOUS CONTROL (between frames)
-            # ================================================================
-            if current_waypoint is not None:
-                waypoint_world = grid_to_world(current_waypoint)
-                v_left, v_right = navigate_to_waypoint(robot_id, waypoint_world)
-                set_wheel_velocities(robot_id, v_left, v_right)
-
-            # Slow down simulation for human viewing
-            if step % 24 == 0:  # 10 Hz update
-                time.sleep(0.01)
-
-            # Check for stop condition (coverage or time limit)
-            if metrics['coverage'] > 95:
-                print("\n" + "=" * 70)
-                print("MISSION COMPLETE: 95% coverage achieved!")
-                print("=" * 70)
-                break
-
-            if sim_time > 300:  # 5 minute timeout
-                print("\n" + "=" * 70)
-                print("TIME LIMIT REACHED")
-                print("=" * 70)
-                break
-
+            
     except KeyboardInterrupt:
-        print("\n\nSimulation interrupted by user")
-
-    finally:
-        print("\n" + "=" * 70)
-        print("FINAL METRICS")
-        print("=" * 70)
-        print(f"  Runtime: {sim_time:.1f}s")
-        print(f"  Frames processed: {frame_count}")
-        print(f"  Coverage: {metrics['coverage']:.1f}%")
-        print(f"  Avg hazard (visited): {metrics['avg_hazard']:.3f}")
-        print(f"  Avg entropy (visited): {metrics['avg_entropy']:.3f}")
-        print("=" * 70)
-
-        # Keep dashboard open
-        print("\nDashboard will remain open. Close the matplotlib window to exit.")
-        plt.ioff()
-        plt.show()
-
-        # Disconnect PyBullet
         p.disconnect()
 
 if __name__ == "__main__":
