@@ -380,23 +380,79 @@ def setup_pybullet_env():
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
     p.setGravity(0, 0, -10)
 
-    # Load ground plane
+    # Load ground plane with concrete texture
     plane_id = p.loadURDF("plane.urdf")
+    p.changeVisualShape(plane_id, -1, rgbaColor=[0.5, 0.5, 0.5, 1])
 
-    # Create warehouse walls (lightweight)
-    wall_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 10, 1])
-    wall_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.1, 10, 1], rgbaColor=[0.6, 0.6, 0.6, 1])
+    # Create warehouse walls with industrial look
+    wall_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.15, 10, 2])
+    wall_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.15, 10, 2],
+                                      rgbaColor=[0.4, 0.4, 0.45, 1])
 
-    p.createMultiBody(0, wall_shape, wall_visual, [10, 0, 1])   # +X wall
-    p.createMultiBody(0, wall_shape, wall_visual, [-10, 0, 1])  # -X wall
+    p.createMultiBody(0, wall_shape, wall_visual, [10, 0, 2])   # +X wall
+    p.createMultiBody(0, wall_shape, wall_visual, [-10, 0, 2])  # -X wall
 
-    wall_shape2 = p.createCollisionShape(p.GEOM_BOX, halfExtents=[10, 0.1, 1])
-    wall_visual2 = p.createVisualShape(p.GEOM_BOX, halfExtents=[10, 0.1, 1], rgbaColor=[0.6, 0.6, 0.6, 1])
+    wall_shape2 = p.createCollisionShape(p.GEOM_BOX, halfExtents=[10, 0.15, 2])
+    wall_visual2 = p.createVisualShape(p.GEOM_BOX, halfExtents=[10, 0.15, 2],
+                                       rgbaColor=[0.4, 0.4, 0.45, 1])
 
-    p.createMultiBody(0, wall_shape2, wall_visual2, [0, 10, 1])   # +Y wall
-    p.createMultiBody(0, wall_shape2, wall_visual2, [0, -10, 1])  # -Y wall
+    p.createMultiBody(0, wall_shape2, wall_visual2, [0, 10, 2])   # +Y wall
+    p.createMultiBody(0, wall_shape2, wall_visual2, [0, -10, 2])  # -Y wall
+
+    # Add some warehouse props (shelves, pallets)
+    create_warehouse_props()
 
     return physics_client
+
+def create_warehouse_props():
+    """Create warehouse environment props (shelves, pallets, crates)"""
+
+    # Wooden pallets
+    pallet_positions = [
+        [-8, -7, 0.1],
+        [8, -7, 0.1],
+        [-8, 8, 0.1],
+        [7, 8, 0.1]
+    ]
+
+    for pos in pallet_positions:
+        # Pallet base
+        pallet_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.6, 0.8, 0.08])
+        pallet_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.6, 0.8, 0.08],
+                                           rgbaColor=[0.6, 0.4, 0.2, 1])
+        p.createMultiBody(10.0, pallet_shape, pallet_visual, pos)
+
+        # Crate on top
+        crate_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.4])
+        crate_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.4],
+                                          rgbaColor=[0.5, 0.35, 0.2, 1])
+        crate_pos = [pos[0], pos[1], pos[2] + 0.5]
+        p.createMultiBody(5.0, crate_shape, crate_visual, crate_pos)
+
+    # Industrial shelving units
+    shelf_positions = [
+        [-9, 0, 1.0],
+        [9, 0, 1.0]
+    ]
+
+    for pos in shelf_positions:
+        # Vertical posts
+        post_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.05, 0.05, 1.0])
+        post_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.05, 0.05, 1.0],
+                                         rgbaColor=[0.3, 0.3, 0.3, 1])
+
+        for offset_y in [-1.0, 1.0]:
+            post_pos = [pos[0], pos[1] + offset_y, pos[2]]
+            p.createMultiBody(0, post_shape, post_visual, post_pos)
+
+        # Horizontal shelves
+        shelf_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 1.0, 0.02])
+        shelf_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.1, 1.0, 0.02],
+                                          rgbaColor=[0.35, 0.35, 0.35, 1])
+
+        for shelf_height in [0.5, 1.0, 1.5]:
+            shelf_pos = [pos[0], pos[1], shelf_height]
+            p.createMultiBody(0, shelf_shape, shelf_visual, shelf_pos)
 
 def create_r2d2_robot(start_pos):
     """
@@ -459,41 +515,134 @@ def create_r2d2_robot(start_pos):
 
 def create_hazard_objects():
     """
-    Create hazard objects (red canisters, spills).
+    Create realistic hazard objects (chemical barrels, spills, warning signs).
 
     Returns: list of (x, y, z) positions
     """
     hazards = []
 
-    # Red canisters (cylinders)
-    canister_positions = [
-        [5, 5, 0.3],
-        [-5, -5, 0.3],
-        [6, -4, 0.3],
-        [-3, 7, 0.3]
+    # === CHEMICAL BARRELS (55-gallon drums) ===
+    # Single barrels with warning markings
+    single_barrel_positions = [
+        [5, 5, 0.45],
+        [-3, 7, 0.45]
     ]
 
-    for pos in canister_positions:
-        shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.3, height=0.6)
-        visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.3, length=0.6,
-                                     rgbaColor=[0.9, 0.1, 0.1, 1])  # RED
-        p.createMultiBody(1.0, shape, visual, pos)
+    for pos in single_barrel_positions:
+        # Main barrel body (red with yellow stripe)
+        barrel_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.3, height=0.9)
+        barrel_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.3, length=0.9,
+                                           rgbaColor=[0.85, 0.1, 0.05, 1])  # Bright red
+        barrel_id = p.createMultiBody(15.0, barrel_shape, barrel_visual, pos)
+
+        # Yellow warning stripe (top ring)
+        stripe_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.32, length=0.15,
+                                           rgbaColor=[0.95, 0.85, 0.1, 1])  # Warning yellow
+        stripe_pos = [pos[0], pos[1], pos[2] + 0.35]
+        p.createMultiBody(0, -1, stripe_visual, stripe_pos)
+
+        # Black hazard symbol (small cylinder on top)
+        symbol_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.08, length=0.02,
+                                           rgbaColor=[0.1, 0.1, 0.1, 1])
+        symbol_pos = [pos[0], pos[1], pos[2] + 0.46]
+        p.createMultiBody(0, -1, symbol_visual, symbol_pos)
+
         hazards.append(pos)
 
-    # Spill markers (flat boxes)
-    spill_positions = [
-        [3, -6, 0.01],
-        [-7, 2, 0.01]
+    # Stacked barrels (more dangerous - multiple hazards)
+    stacked_positions = [
+        [-5, -5],
+        [6, -4]
     ]
 
-    for pos in spill_positions:
-        shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.8, 0.8, 0.01])
-        visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.8, 0.8, 0.01],
-                                     rgbaColor=[0.8, 0.0, 0.0, 0.8])  # RED translucent
-        p.createMultiBody(0, shape, visual, pos)
-        hazards.append(pos)
+    for base_xy in stacked_positions:
+        # Bottom barrel
+        pos_bottom = [base_xy[0], base_xy[1], 0.45]
+        barrel_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.3, height=0.9)
+        barrel_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.3, length=0.9,
+                                           rgbaColor=[0.9, 0.15, 0.05, 1])
+        p.createMultiBody(15.0, barrel_shape, barrel_visual, pos_bottom)
+
+        # Yellow stripe
+        stripe_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.32, length=0.15,
+                                           rgbaColor=[0.95, 0.85, 0.1, 1])
+        p.createMultiBody(0, -1, stripe_visual, [pos_bottom[0], pos_bottom[1], pos_bottom[2] + 0.35])
+
+        # Top barrel (offset for realism)
+        offset_x = 0.1 if base_xy[0] > 0 else -0.1
+        pos_top = [base_xy[0] + offset_x, base_xy[1], 0.45 + 0.9]
+        barrel_visual2 = p.createVisualShape(p.GEOM_CYLINDER, radius=0.3, length=0.9,
+                                            rgbaColor=[0.85, 0.12, 0.08, 1])
+        p.createMultiBody(15.0, barrel_shape, barrel_visual2, pos_top)
+
+        # Stripe on top barrel
+        p.createMultiBody(0, -1, stripe_visual, [pos_top[0], pos_top[1], pos_top[2] + 0.35])
+
+        hazards.append(pos_bottom)
+        hazards.append(pos_top)
+
+    # === LIQUID SPILLS ===
+    # Large irregular spill (multiple overlapping puddles)
+    spill_center_1 = [3, -6]
+    create_realistic_spill(spill_center_1, num_puddles=8, color=[0.7, 0.05, 0.0, 0.85])
+    hazards.append([spill_center_1[0], spill_center_1[1], 0.01])
+
+    # Medium spill near leaking barrel
+    spill_center_2 = [-7, 2]
+    create_realistic_spill(spill_center_2, num_puddles=5, color=[0.8, 0.1, 0.0, 0.9])
+    hazards.append([spill_center_2[0], spill_center_2[1], 0.01])
+
+    # === WARNING SIGNS ===
+    # Place warning signs near major hazards
+    sign_positions = [
+        [5.8, 5.8, 0.5],    # Near single barrel
+        [-5.8, -4.5, 0.5],  # Near stacked barrels
+        [3.5, -5.5, 0.5]    # Near large spill
+    ]
+
+    for pos in sign_positions:
+        # Yellow warning sign (triangle)
+        sign_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.02, 0.3, 0.3])
+        sign_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.02, 0.3, 0.3],
+                                         rgbaColor=[0.95, 0.8, 0.1, 1])
+        p.createMultiBody(0, sign_shape, sign_visual, pos)
+
+        # Red exclamation mark
+        mark_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[0.03, 0.05, 0.15],
+                                         rgbaColor=[0.9, 0.0, 0.0, 1])
+        p.createMultiBody(0, -1, mark_visual, [pos[0], pos[1], pos[2] + 0.05])
 
     return hazards
+
+def create_realistic_spill(center_xy, num_puddles=6, color=[0.7, 0.0, 0.0, 0.8]):
+    """
+    Create an irregular spill using multiple overlapping puddles.
+
+    Args:
+        center_xy: [x, y] center of spill
+        num_puddles: number of overlapping puddles for irregular shape
+        color: RGBA color
+    """
+    for i in range(num_puddles):
+        # Random offset from center
+        angle = (i / num_puddles) * 2 * np.pi + np.random.uniform(-0.3, 0.3)
+        radius = np.random.uniform(0.3, 0.8)
+        offset_x = radius * np.cos(angle)
+        offset_y = radius * np.sin(angle)
+
+        # Puddle position
+        pos = [center_xy[0] + offset_x, center_xy[1] + offset_y, 0.005]
+
+        # Elliptical puddle
+        size_x = np.random.uniform(0.4, 0.7)
+        size_y = np.random.uniform(0.4, 0.7)
+
+        puddle_shape = p.createCollisionShape(p.GEOM_BOX,
+                                             halfExtents=[size_x, size_y, 0.005])
+        puddle_visual = p.createVisualShape(p.GEOM_BOX,
+                                           halfExtents=[size_x, size_y, 0.005],
+                                           rgbaColor=color)
+        p.createMultiBody(0, puddle_shape, puddle_visual, pos)
 
 def get_robot_state(robot_id):
     """
