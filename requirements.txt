@@ -1,0 +1,16 @@
+# Semantix: Research-Grade Proactive Hazard Scout
+# Dependencies for PyBullet simulation + visualization
+
+# Core simulation
+pybullet>=3.2.5
+
+# Numerical computing
+numpy>=1.21.0
+
+# Visualization
+matplotlib>=3.5.0
+
+# Optional: Real VLM support
+# Uncomment if using USE_VLM=1
+# requests>=2.28.0
+# pillow>=9.0.0
