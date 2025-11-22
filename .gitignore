@@ -6,25 +6,81 @@ __pycache__/
 .Python
 env/
 venv/
-*.egg-info/
-dist/
+ENV/
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
 # PyBullet
 *.bullet
+*.bullet.log
 
-# Matplotlib
+# Matplotlib / Visualization outputs
 *.png
 *.jpg
+*.jpeg
 *.pdf
+*.svg
+*.gif
+*.mp4
+*.avi
 
-# IDE
-.vscode/
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# PyCharm / IDEs
 .idea/
+.vscode/
 *.swp
 *.swo
 *~
+.project
+.pydevproject
+.settings/
 
 # OS
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+install_log.txt
+
+# PyBullet source (if accidentally downloaded)
+pybullet-*.tar.gz
+pybullet-*/
+
+# Environment variables
+.env
+.env.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
