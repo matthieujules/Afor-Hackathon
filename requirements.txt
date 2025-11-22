@@ -10,7 +10,12 @@ numpy>=1.21.0
 # Visualization
 matplotlib>=3.5.0
 
-# Optional: Real VLM support
-# Uncomment if using USE_VLM=1
-# requests>=2.28.0
-# pillow>=9.0.0
+# DINOv3 vision model (default mode)
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.56.0
+huggingface_hub>=0.20.0
+
+# VLM support (optional - for USE_VLM=1 mode)
+requests>=2.28.0
+pillow>=9.0.0

@@ -1,177 +1,109 @@
-# Semantix
+# Semantix: "The Panopticon"
 
-**Proactive hazard scout with discrete vision (0.2 Hz) using VLM-derived semantic mapping and entropy-guided exploration**
+**Stationary Active Vision Scout with Semantic Curiosity**
 
-Built for extreme perception constraints: 1 frame every 5 seconds (Raspberry Pi compatible)
-
----
+Instead of moving physically, the robot rotates its view 360° to explore. It uses vision models to predict where interesting content continues off-screen ("White Glow"), then follows those trails rather than exhaustively scanning.
 
 ## Quick Start
 
 ```bash
-# Install
-pip3 install numpy matplotlib pybullet
+# Install dependencies
+pip3 install -r requirements.txt
 
-# Test
-python3 test_components.py
-
-# Run
+# Run the simulation
 python3 scout_semantix.py
 ```
 
-**What you'll see:**
-- PyBullet 3D warehouse simulation (left window)
-- 2×2 Mission Control dashboard (right window): visited | hazard | entropy | utility
+**First run:** DINOv2 model downloads automatically (~84MB). If you see SSL errors on macOS, run:
+```bash
+/Applications/Python\ 3.11/Install\ Certificates.command
+```
 
----
+## What You'll See
 
-## Key Features
+**Two windows will open:**
 
-**Bayesian Semantic Mapping**
-- Beta posterior per grid cell: `μ = α/(α+β)`
-- Semantic entropy: `H(μ) = -μ log μ - (1-μ) log(1-μ)`
-- White glow prediction: `g = (K ⊗ μ) ⊙ (1-v)` (novel spatial prior for unseen cells)
+1. **PyBullet 3D Simulation**: R2D2 robot in a warehouse environment with cluttered and empty zones
+2. **Matplotlib Dashboard**: Three real-time panels showing:
+   - Semantic interest map (what the robot has learned)
+   - Predictive glow map (where it expects to find interest)
+   - Live camera feed (what the robot currently sees)
 
-**VLM-Style Perception**
-- Hazard scoring: `s ∈ [0,1]` with confidence `w = exp(-0.15·range)`
-- FOV projection: 70° field of view, 6m range
-- Pluggable: stub (fast) or real VLM via API
+**Console output every ~5 seconds:**
+```
+Analyzing view at 45.0°...
+  Interest: 0.73 | Lead: right
+  Decision: Curiosity (Following Glow)
+  Saccading to 90.0° (Ent: 12.3, Glow: 18.7)
+```
 
-**Event-Triggered Planning**
-- Replans only on new frames (5s period)
-- Multi-objective utility: `U = λ₁·hazard + λ₂·entropy + λ₃·glow - λ₄·path`
-- Continuous control between frames (240 Hz)
+## How It Works
 
----
+### The Loop (0.2 Hz)
 
-## Demo Script (60 sec)
+```
+Capture Frame → Vision Analysis (DINOv2)
+                    ↓
+            Update Semantic Maps
+                    ↓
+            Project "Glow" (Visual Continuity)
+                    ↓
+            Plan Next Best View
+                    ↓
+            Saccade (Rotate to New Angle)
+```
 
-> "Semantix scouts hazards with extreme vision constraints: **1 frame every 5 seconds** (0.2 Hz).
->
-> Watch the dashboard: hazard posterior spikes red when Scout glimpses canisters, entropy drops in explored areas, and **white glow** predicts where unseen hazards might be.
->
-> Scout achieves 90% coverage in 2 minutes using only **24 frames**—that's 2 minutes of actual vision. Language-as-cost perception + semantic entropy + our novel white-glow spatial prior."
+### Key Innovation: Visual Continuity
 
----
+When the vision model detects that interesting content continues off-screen (e.g., "cable runs left"), the system:
+1. Projects a cone of predicted utility ("White Glow") into unseen areas in that direction
+2. Weights that direction higher when planning the next view
+3. Follows features to their conclusion rather than systematically scanning
 
-## Configuration
+This mimics human visual search behavior.
 
-Edit `scout_semantix.py` (lines 35-49):
+## Vision Modes
+
+**DINOv2 (default)** - Local model, no auth
+```bash
+python3 scout_semantix.py
+```
+
+**DINOv3** - Better model, requires [Hugging Face](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m) auth (see CLAUDE.md)
+```bash
+USE_DINOV3=1 python3 scout_semantix.py
+```
+
+**VLM** - Gemini/OpenAI (requires API key)
+```bash
+export GEMINI_API_KEY="your_key"
+USE_VLM=1 python3 scout_semantix.py
+```
+
+## Key Parameters
+
+`scout_semantix.py:35-50`:
 
 ```python
-GRID_SIZE = 64          # resolution (32/64/128)
-FRAME_PERIOD = 5.0      # seconds (vision frequency)
-FOV_DEGREES = 70        # camera field of view
-MAX_RANGE = 6.0         # meters
+FRAME_PERIOD = 5.0       # Seconds between analyses
+FOV_DEGREES = 60         # Camera field of view
+MAX_RANGE = 8.0          # Vision range (meters)
 
-LAMBDA_HAZARD = 1.0     # exploitation weight
-LAMBDA_ENTROPY = 0.5    # exploration weight
-LAMBDA_GLOW = 0.8       # prediction weight (white glow)
-LAMBDA_PATH = 0.1       # efficiency weight
+LAMBDA_INTEREST = 1.0    # Weight on interesting content
+LAMBDA_ENTROPY = 0.8     # Weight on exploring unknown
+LAMBDA_GLOW = 1.5        # Weight on following predictions (HIGHEST)
 ```
 
-**Ablation modes** (line 46):
-- `'full'` - all terms (default)
-- `'hazard_only'` - greedy exploitation
-- `'entropy_only'` - frontier exploration
+**The glow weight is highest** - robot prefers following visual trails over random exploration.
 
----
-
-## Architecture
+## Files
 
 ```
-Frame (5s) → FOV Projection → VLM Scoring → Bayesian Update
-                                                    ↓
-Waypoint ← Utility Max ← Planning ← μ, H(μ), g (white glow)
-    ↓
-Control (240 Hz) → Robot
+scout_semantix.py          # Main simulation
+vision_alternatives.py     # DINOv2/v3 clients
+vlm_client.py              # VLM interface
+tests/                     # Test suite
+CLAUDE.md                  # Technical docs
 ```
 
-**Files:**
-- `scout_semantix.py` (850 lines) - main system
-- `test_components.py` - unit tests (all passing)
-- `mock_vlm_server.py` - VLM API simulator
-- `run_demo.sh` - ablation runner
-
----
-
-## Research Novelty
-
-**1. White Glow Spatial Prior**
-- Predicts hazard value in *unseen* cells: `g = (K ⊗ μ) ⊙ (1-v)`
-- Intuition: hazards cluster/spread → Gaussian diffusion onto neighbors
-- Impact: 23% faster hazard discovery (estimated)
-
-**2. Discrete Vision Robustness**
-- Event-triggered replanning at 0.2 Hz (vs typical 10+ Hz SLAM)
-- Decouples perception (0.2 Hz) from control (240 Hz)
-- Raspberry Pi deployable
-
-**3. Language-as-Cost Bayesian Fusion**
-- VLM → probabilistic score → Beta posterior
-- Open-vocabulary (no detector training)
-- Uncertainty-aware via Bayesian inference
-
----
-
-## Expected Metrics
-
-- **Runtime:** 2-3 minutes
-- **Coverage:** 90-95%
-- **Frames:** 24-36 (only 2-3 minutes of vision!)
-- **Hazards found:** 6/6 (100%)
-
----
-
-## Optional: Real VLM
-
-**Terminal 1:**
-```bash
-python3 mock_vlm_server.py
-```
-
-**Terminal 2:**
-```bash
-USE_VLM=1 VLM_ENDPOINT=http://localhost:8000/score python3 scout_semantix.py
-```
-
-Mock server uses red-pixel detection. For real VLM, implement custom endpoint.
-
----
-
-## Troubleshooting
-
-**PyBullet won't compile?**
-```bash
-pip3 install --pre pybullet  # try pre-built wheel
-```
-
-**Matplotlib backend error?**
-Edit line 24 of `scout_semantix.py`:
-```python
-matplotlib.use('TkAgg')  # or 'Qt5Agg'
-```
-
-**Robot stuck?**
-Reduce path cost: `LAMBDA_PATH = 0.05`
-
-**Slow performance?**
-Reduce grid: `GRID_SIZE = 32`
-
----
-
-## References
-
-**[1]** Language-as-Cost: Proactive Hazard Mapping using VLM (arXiv:2508.03138)
-**[2]** ActiveGAMER: Active Gaussian Mapping through Efficient Rendering (CVPR 2025)
-**[3]** ActiveSGM: Understanding while Exploring (arXiv:2506.00225)
-
----
-
-## License
-
-MIT License - Hackathon/Research use
-
----
-
-**Built in one shot | Demo-ready | Production-quality**
+See **CLAUDE.md** for architecture, troubleshooting, and development details.

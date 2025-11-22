@@ -49,9 +49,19 @@ LAMBDA_ENTROPY = 0.8    # weight on exploring the unknown
 LAMBDA_GLOW = 1.5       # weight on following the "lead" (continuity)
 SACCADE_COST = 0.05     # cost of rotating (degrees)
 
-# VLM settings
+# Vision model settings
 USE_REAL_VLM = os.getenv('USE_VLM', '0') == '1'
-vlm_client = VLMClient(provider="gemini" if USE_REAL_VLM else "mock")
+if USE_REAL_VLM:
+    print("Vision Mode: VLM (Gemini/OpenAI)")
+    from vlm_client import VLMClient
+    vlm_client = VLMClient(provider="gemini")
+else:
+    # Use DINOv2 by default for fast, local vision analysis (no auth required)
+    # Set USE_DINOV3=1 to use DINOv3 instead (requires Hugging Face auth)
+    print("Vision Mode: DINO (Local Model)")
+    from vision_alternatives import DinoV2Client
+    vlm_client = DinoV2Client()
+    print()
 
 # Bayesian update parameters
 CONFIDENCE_DECAY = 0.10
@@ -174,14 +184,13 @@ def project_glow(robot_pos, current_heading, lead_direction):
 def calculate_view_utility(robot_pos, candidate_heading):
     """
     Evaluate how good looking in a specific direction would be.
-    Utility = Sum(Unseen * Entropy) + Sum(Glow) + Sum(Known Interest)
+    Returns: total_score, (entropy_score, glow_score)
     """
     # Get cells in this candidate view
     cells = get_fov_mask(robot_pos, candidate_heading, FOV_DEGREES, MAX_RANGE)
     
     u_entropy = 0
     u_glow = 0
-    u_interest = 0
     
     for gy, gx in cells:
         is_seen = seen_map[gy, gx]
@@ -193,46 +202,32 @@ def calculate_view_utility(robot_pos, candidate_heading):
         # Glow: High if we predicted something there
         u_glow += glow_map[gy, gx]
         
-        # Interest: Re-looking at interesting things (confirmation)
-        # or looking near interesting things.
-        # For now, let's say we want to discover NEW things, so we don't reward
-        # looking at known interesting things too much, unless we want to track them.
-        # Let's focus on Exploration + Glow.
-        
-    # Normalize by number of cells to get average utility per pixel
-    if len(cells) == 0: return 0
+    # Normalize? No, we want total information gain.
+    if len(cells) == 0: return 0, (0, 0)
     
-    total_score = (LAMBDA_ENTROPY * u_entropy) + (LAMBDA_GLOW * u_glow)
-    return total_score
+    score_entropy = LAMBDA_ENTROPY * u_entropy
+    score_glow = LAMBDA_GLOW * u_glow
+    
+    total_score = score_entropy + score_glow
+    return total_score, (score_entropy, score_glow)
 
 def choose_next_angle(robot_pos, current_heading):
     """Scan 360 degrees and pick the best angle."""
     best_angle = current_heading
     best_score = -1e9
-    
-    # Check 8 directions (every 45 degrees)
-    # Also check current direction to see if we should stay? 
-    # Usually we want to move.
+    best_components = (0, 0)
     
     candidates = np.linspace(0, 2*np.pi, 16, endpoint=False) # 16 directions
     
-    scores = []
-    
     for ang in candidates:
-        # Penalize large rotations (saccade cost)
-        # diff = abs(ang - current_heading)
-        # diff = min(diff, 2*np.pi - diff)
-        # cost = diff * SACCADE_COST
-        cost = 0 # For now, instant rotation
-        
-        score = calculate_view_utility(robot_pos, ang) - cost
-        scores.append(score)
+        score, components = calculate_view_utility(robot_pos, ang)
         
         if score > best_score:
             best_score = score
             best_angle = ang
+            best_components = components
             
-    return best_angle, scores, candidates
+    return best_angle, best_score, best_components
 
 # ============================================================================
 # PYBULLET ENV
@@ -343,8 +338,14 @@ def main():
                 project_glow([0,0], current_yaw, lead)
                 
                 # 5. Plan Next Saccade
-                next_yaw, scores, angles = choose_next_angle([0,0], current_yaw)
-                print(f"  Saccading to {math.degrees(next_yaw):.1f}° (Score: {max(scores):.2f})")
+                next_yaw, score, (s_ent, s_glow) = choose_next_angle([0,0], current_yaw)
+                
+                reason = "Exploration (Entropy)"
+                if s_glow > s_ent:
+                    reason = "Curiosity (Following Glow)"
+                    
+                print(f"  Decision: {reason}")
+                print(f"  Saccading to {math.degrees(next_yaw):.1f}° (Ent: {s_ent:.1f}, Glow: {s_glow:.1f})")
                 
                 current_yaw = next_yaw
                 
