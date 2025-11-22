@@ -239,12 +239,17 @@ def setup_env():
     print("[SETUP] Connecting to PyBullet GUI...")
     p.connect(p.GUI)
     print("[SETUP] PyBullet connected")
+
+    # Set search path for default URDFs
+    import pybullet_data
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
     p.setGravity(0, 0, -9.8)
-    
+    print("[SETUP] Search path configured")
+
     # Room
     print("[SETUP] Loading ground plane...")
     p.loadURDF("plane.urdf")
+    print("[SETUP] Ground plane loaded")
 
     # Walls - proper 20x20m enclosure with grounded walls
     print("[SETUP] Loading walls...")
@@ -273,29 +278,55 @@ def setup_env():
         duck_id = p.loadURDF("duck_vhacd.urdf", [x, y, 0.5], globalScaling=2.0)
         print(f"  Duck {i+1} at ({x:.1f}, {y:.1f}, 0.5)")
 
-    # === BORING ZONE (Left) ===
+    # === BORING ZONE (West) ===
     # Empty
-    
-    # Robot (Fixed Base)
-    robot_id = p.loadURDF("r2d2.urdf", [0, 0, 0.5])
+
+    # === ROBOT (FIXED BASE PANOPTICON) ===
+    # useFixedBase=True prevents physics from fighting manual rotation
+    # Robot is anchored at origin, rotates on yaw axis only
+    print("[SETUP] Spawning Panopticon Agent (Fixed Base)...")
+    robot_id = p.loadURDF("r2d2.urdf", [0, 0, 0.5], useFixedBase=True)
+    print(f"[SETUP] Robot ID: {robot_id} (Fixed at origin)")
+
     return robot_id
 
 def get_camera_image(robot_id, yaw):
-    """Render camera view from robot head."""
-    # R2D2 head is roughly at z=0.8
-    pos = [0, 0, 0.8]
-    
-    # Target
-    tx = pos[0] + 2 * np.cos(yaw)
-    ty = pos[1] + 2 * np.sin(yaw)
-    tz = pos[2] - 0.2 # Look slightly down
-    
-    view_matrix = p.computeViewMatrix(pos, [tx, ty, tz], [0, 0, 1])
-    proj_matrix = p.computeProjectionMatrixFOV(FOV_DEGREES, 1.0, 0.1, 20.0)
-    
-    w, h, rgb, _, _ = p.getCameraImage(320, 320, view_matrix, proj_matrix)
+    """Render camera view from robot head, oriented according to yaw."""
+    # Camera positioned at robot head
+    cam_height = 0.8
+    pos = [0, 0, cam_height]
+
+    # Target point 2m away in the direction robot is facing
+    target_distance = 2.0
+    tx = pos[0] + target_distance * np.cos(yaw)
+    ty = pos[1] + target_distance * np.sin(yaw)
+    tz = cam_height - 0.2  # Look slightly down
+
+    # Up vector - always pointing up in world frame
+    up_vector = [0, 0, 1]
+
+    view_matrix = p.computeViewMatrix(
+        cameraEyePosition=pos,
+        cameraTargetPosition=[tx, ty, tz],
+        cameraUpVector=up_vector
+    )
+    proj_matrix = p.computeProjectionMatrixFOV(
+        fov=FOV_DEGREES,
+        aspect=1.0,
+        nearVal=0.1,
+        farVal=20.0
+    )
+
+    w, h, rgb, depth, seg = p.getCameraImage(
+        width=320,
+        height=320,
+        viewMatrix=view_matrix,
+        projectionMatrix=proj_matrix,
+        renderer=p.ER_BULLET_HARDWARE_OPENGL
+    )
+
     rgb = np.array(rgb, dtype=np.uint8).reshape((h, w, 4))
-    return rgb[:, :, :3] # Drop alpha
+    return rgb[:, :, :3]  # Drop alpha channel
 
 # ============================================================================
 # MAIN LOOP
@@ -308,45 +339,71 @@ def main():
     robot_id = setup_env()
     print("[MAIN] Environment setup complete")
 
-    # Dashboard
+    # Dashboard - 2x3 grid: Live feed + Analysis snapshot + 3 semantic visualizations
     print("[VIZ] Setting up matplotlib visualization...")
     plt.ion()
     print("[VIZ] Creating figure...")
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    print("[VIZ] Figure created")
-    ax_pca = axes[0]
-    ax_attention = axes[1]
-    ax_similarity = axes[2]
+    fig = plt.figure(figsize=(18, 10))
+    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
 
-    ax_pca.set_title("DINOv3 PCA Rainbow (Semantic Regions)")
-    ax_attention.set_title("DINOv3 Attention Map (Focus Areas)")
-    ax_similarity.set_title("DINOv3 Patch Similarity (Center)")
+    ax_live = fig.add_subplot(gs[0, 0])
+    ax_snapshot = fig.add_subplot(gs[1, 0])
+    ax_pca = fig.add_subplot(gs[0, 1])
+    ax_attention = fig.add_subplot(gs[1, 1])
+    ax_similarity = fig.add_subplot(gs[0, 2])
+
+    print("[VIZ] Figure created")
+
+    ax_live.set_title("LIVE FEED (~10 FPS)", fontweight='bold', fontsize=12, color='red')
+    ax_snapshot.set_title("Analysis Snapshot (Every 5s)", fontweight='bold', fontsize=10)
+    ax_pca.set_title("DINOv3 PCA Rainbow", fontsize=10)
+    ax_attention.set_title("DINOv3 Attention Map", fontsize=10)
+    ax_similarity.set_title("DINOv3 Patch Similarity", fontsize=10)
 
     # Initialize with dummy data (will be updated)
+    img_live = ax_live.imshow(np.zeros((320, 320, 3), dtype=np.uint8))
+    img_snapshot = ax_snapshot.imshow(np.zeros((320, 320, 3), dtype=np.uint8))
     img_pca = ax_pca.imshow(np.zeros((14, 14, 3)))
     img_attention = ax_attention.imshow(np.zeros((14, 14)), cmap='hot', vmin=0, vmax=1)
     img_similarity = ax_similarity.imshow(np.zeros((14, 14)), cmap='viridis', vmin=0, vmax=1)
 
+    ax_live.axis('off')
+    ax_snapshot.axis('off')
     ax_pca.axis('off')
     ax_attention.axis('off')
     ax_similarity.axis('off')
     
     print("PANOPTICON ACTIVATED. Scanning for Interest...")
-    
+
+    # Set initial robot orientation
+    quat = p.getQuaternionFromEuler([0, 0, current_yaw])
+    p.resetBasePositionAndOrientation(robot_id, [0, 0, 0.5], quat)
+
     step = 0
+    last_yaw = current_yaw  # Track when rotation actually changes
+
     try:
         while True:
+            # Step physics (affects ducks/boxes, but robot is fixed base)
             p.stepSimulation()
 
-            # Rotate robot visually
-            quat = p.getQuaternionFromEuler([0, 0, current_yaw])
-            p.resetBasePositionAndOrientation(robot_id, [0,0,0.5], quat)
+            # Live feed update (~10 FPS at 20Hz sim speed)
+            if step % 2 == 0:
+                live_rgb = get_camera_image(robot_id, current_yaw)
+                img_live.set_data(live_rgb)
+                # Draw live feed updates more frequently
+                if step % 10 == 0:  # Update display every 10 steps to reduce overhead
+                    fig.canvas.draw_idle()
+                    fig.canvas.flush_events()
 
-            if step % 100 == 0: # Every ~5 seconds (at 20Hz sim speed for demo)
+            # Full vision analysis (every ~5 seconds)
+            if step % 100 == 0:
 
-                # 1. Capture
+                # 1. Capture snapshot for analysis
                 rgb = get_camera_image(robot_id, current_yaw)
-                img_cam.set_data(rgb)
+
+                # Update analysis snapshot view
+                img_snapshot.set_data(rgb)
 
                 # 2. Analyze (Vision - with error handling for robustness)
                 print(f"Analyzing view at {math.degrees(current_yaw):.1f}°...")
@@ -377,23 +434,29 @@ def main():
                     
                 print(f"  Decision: {reason}")
                 print(f"  Saccading to {math.degrees(next_yaw):.1f}° (Ent: {s_ent:.1f}, Glow: {s_glow:.1f})")
-                
+
+                # Update robot yaw
                 current_yaw = next_yaw
-                
-                # Update Viz
-                # Overlay seen mask on interest map?
-                # For now just raw maps
-                img_map.set_data(interest_map)
-                img_glow.set_data(glow_map)
-                
-                # Draw robot FOV on map
-                for patch in ax_map.patches:
-                    patch.remove()
-                wedge = Wedge((GRID_SIZE/2, GRID_SIZE/2), MAX_RANGE/CELL_SIZE, 
-                              math.degrees(current_yaw) - FOV_DEGREES/2,
-                              math.degrees(current_yaw) + FOV_DEGREES/2,
-                              color='white', alpha=0.3)
-                ax_map.add_patch(wedge)
+
+                # Only update robot rotation if yaw changed
+                if abs(current_yaw - last_yaw) > 0.01:
+                    quat = p.getQuaternionFromEuler([0, 0, current_yaw])
+                    p.resetBasePositionAndOrientation(robot_id, [0, 0, 0.5], quat)
+                    last_yaw = current_yaw
+
+                # Update DINOv3 Semantic Visualizations
+                if 'pca_vis' in analysis:
+                    # Upscale to make visualizations clearer
+                    from scipy.ndimage import zoom
+                    pca_upscaled = zoom(analysis['pca_vis'], (20, 20, 1), order=1)
+                    attention_upscaled = zoom(analysis['attention_map'], (20, 20), order=1)
+                    similarity_upscaled = zoom(analysis['similarity_map'], (20, 20), order=1)
+
+                    img_pca.set_data(pca_upscaled)
+                    img_attention.set_data(attention_upscaled)
+                    img_similarity.set_data(similarity_upscaled)
+                else:
+                    print("  WARNING: No DINOv3 visualizations available (using DINOv2 or fallback mode)")
                 
                 fig.canvas.draw()
                 fig.canvas.flush_events()

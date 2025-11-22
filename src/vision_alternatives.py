@@ -139,6 +139,9 @@ class DinoV2Client(BaseVisionClient):
             self.processor = AutoImageProcessor.from_pretrained(model_name)
             self.model = AutoModel.from_pretrained(model_name)
 
+            # Enable eager attention to support attention map extraction
+            self.model.set_attn_implementation('eager')
+
             self.model = self.model.to(self.device)
             self.model.eval()
 
