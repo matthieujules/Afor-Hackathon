@@ -1,0 +1,26 @@
+pybullet build time: Nov 22 2025 11:24:36
+Using cache found in /Users/matthieuhuss/.cache/torch/hub/facebookresearch_dinov2_main
+/Users/matthieuhuss/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/swiglu_ffn.py:51: UserWarning: xFormers is not available (SwiGLU)
+  warnings.warn("xFormers is not available (SwiGLU)")
+/Users/matthieuhuss/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/attention.py:33: UserWarning: xFormers is not available (Attention)
+  warnings.warn("xFormers is not available (Attention)")
+/Users/matthieuhuss/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/block.py:40: UserWarning: xFormers is not available (Block)
+  warnings.warn("xFormers is not available (Block)")
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,

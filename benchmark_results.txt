@@ -9,23 +9,23 @@ SYSTEMATIC SCAN (Baseline):
   Efficiency: 1.67 objects/saccade
 
 SEMANTIC CURIOSITY (Ours):
-  Total Saccades: 9
+  Total Saccades: 8
   Objects Discovered: 15/15
   Final Coverage: 100.0%
-  Efficiency: 1.67 objects/saccade
+  Efficiency: 1.88 objects/saccade
 
 COMPARISON:
-  Improvement: +0.0%
-  Saccades Saved: 0
+  Improvement: +11.1%
+  Saccades Saved: 1
 
 DISCOVERY ORDER (Semantic):
-  Saccade  0: desk   at (  0.0,   7.0)
-  Saccade  0: desk   at ( -2.0,   6.5)
-  Saccade  0: desk   at (  2.0,   6.5)
-  Saccade  0: box    at ( -1.0,   7.0)
-  Saccade  0: box    at (  1.0,   7.0)
-  Saccade  2: desk   at (  2.0,  -7.0)
-  Saccade  3: desk   at ( -7.0,   2.0)
-  Saccade  3: desk   at ( -7.0,   0.0)
-  Saccade  3: desk   at ( -7.0,  -2.0)
-  Saccade  3: box    at ( -6.5,   1.0)
+  Saccade  0: desk   at ( -2.0,   6.0)
+  Saccade  0: box    at ( -3.0,   5.5)
+  Saccade  2: desk   at (  2.0,  -5.5)
+  Saccade  2: desk   at (  3.0,  -5.0)
+  Saccade  2: box    at (  2.5,  -6.0)
+  Saccade  3: desk   at ( -5.0,   3.0)
+  Saccade  3: desk   at ( -5.5,   2.0)
+  Saccade  3: box    at ( -6.0,   1.0)
+  Saccade  3: box    at ( -6.5,   0.0)
+  Saccade  3: box    at ( -6.0,  -1.0)

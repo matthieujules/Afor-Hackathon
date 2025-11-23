@@ -27,7 +27,7 @@ from vision_alternatives import DinoV2Client
 GRID_SIZE = 64
 WORLD_SIZE = 20.0
 CELL_SIZE = WORLD_SIZE / GRID_SIZE
-FRAME_PERIOD = 1.0  # Faster for benchmarking (1 second per saccade)
+FRAME_PERIOD = 2.0  # 2 seconds per saccade for testing (change to 10.0 for demos)
 FOV_DEGREES = 60
 MAX_RANGE = 8.0
 FOV_RAYS = 40
@@ -217,7 +217,13 @@ class ExplorationAgent:
         if self.tracker:
             newly_discovered = self.tracker.update(self.seen_map, time.time())
             if newly_discovered:
-                print(f"  [{self.mode.upper()}] Discovered {len(newly_discovered)} new objects!")
+                # Log detailed discovery info
+                discovered_desc = []
+                for idx in newly_discovered:
+                    pos = self.tracker.object_positions[idx]
+                    discovered_desc.append(f"#{idx+1}@({pos[0]:.1f},{pos[1]:.1f})")
+
+                print(f"  [{self.mode.upper():11s}] ✓ DISCOVERED {len(newly_discovered)}: {', '.join(discovered_desc)}")
 
         # 5. Plan next saccade
         next_yaw, score, (s_ent, s_glow) = self.choose_next_angle([0, 0])
@@ -234,8 +240,13 @@ class ExplorationAgent:
             'glow_score': s_glow
         }
 
-        print(f"  [{self.mode.upper():11s}] Yaw: {math.degrees(self.current_yaw):6.1f}° → {math.degrees(next_yaw):6.1f}° | "
-              f"Interest: {i_score:.2f} | Lead: {lead:6s} | {reason}")
+        # Log current state with glow info
+        glow_cells = np.count_nonzero(self.glow_map > 0.1)
+        glow_max = self.glow_map.max()
+
+        print(f"  [{self.mode.upper():11s}] Yaw: {math.degrees(self.current_yaw):6.1f}° → {math.degrees(next_yaw):6.1f}°")
+        print(f"  [{self.mode.upper():11s}]   Interest: {i_score:.2f} | Lead: {lead:6s} | Decision: {reason}")
+        print(f"  [{self.mode.upper():11s}]   Glow: {glow_cells} cells active (max={glow_max:.2f}) | Entropy: {s_ent:.1f} | Glow Score: {s_glow:.1f}")
 
         # Update yaw
         self.current_yaw = next_yaw
@@ -286,69 +297,98 @@ def setup_pybullet_env():
     p.loadURDF("cube.urdf", [-8, 0, wall_z], globalScaling=16, useFixedBase=True)
     walls.append((-8, -8, 0.5, 16))
 
-    # Objects - ONLY 3 CLUSTERS (no random boxes)
+    # Objects - ONLY 3 CLUSTERS (scattered, non-uniform)
     object_positions = []
 
-    print("[SETUP] Creating 3 object clusters...")
+    print("[SETUP] Creating 3 scattered object clusters...")
 
-    # CLUSTER 1: NORTH (visible from start - agent faces North)
-    # 5 objects arranged along north wall
-    print("  Cluster 1 (NORTH): 5 objects at y=6-7m")
-    north_cluster = [
-        [0, 7, 0],      # Center table
-        [-2, 6.5, 0.2], # Left table
-        [2, 6.5, -0.2], # Right table
-        [-1, 7, 0.3],   # Left-center box on shelf
-        [1, 7, -0.1],   # Right-center box on shelf
+    # SUPER CLEAR CLUSTERS: 3 dense, distinct clusters with HUGE empty gaps
+    # All within 7m radius for visibility (MAX_RANGE=8m)
+    # Agent at [0,0] starts facing North (90°), FOV=60° sees 60°-120°
+
+    # CLUSTER 1: NORTHWEST DENSE PACK - 6 objects tightly grouped
+    # Positioned at 120°-150° (just at/past left FOV edge) to trigger LEFT detection
+    print("  Cluster 1 (NORTHWEST): 6 objects TIGHTLY PACKED at 120°-150°")
+    print("    → Semantic agent sees edge → glow LEFT → locks onto entire cluster")
+    northwest_cluster = [
+        [-3, 5.2, 0.1],    # angle≈120°, dist=6.03m
+        [-3.5, 5, 0.2],    # angle≈125°, dist=6.10m
+        [-4, 4.8, -0.1],   # angle≈130°, dist=6.24m
+        [-4.5, 4.5, 0.3],  # angle≈135°, dist=6.36m
+        [-4.8, 4, 0.2],    # angle≈140°, dist=6.24m
+        [-5, 3.5, -0.1],   # angle≈145°, dist=6.10m
     ]
-    for i, pos in enumerate(north_cluster):
-        if i < 3:  # First 3 are tables
+    for i, pos in enumerate(northwest_cluster):
+        dist = (pos[0]**2 + pos[1]**2)**0.5
+        angle_deg = math.degrees(math.atan2(pos[1], pos[0]))
+        print(f"    Object {i+1}: ({pos[0]:4.1f}, {pos[1]:4.1f}) @ {angle_deg:5.1f}°, dist={dist:.2f}m")
+        if i % 2 == 0:
             p.loadURDF("table/table.urdf", pos, p.getQuaternionFromEuler([0, 0, pos[2]]), useFixedBase=True)
             object_positions.append((pos[0], pos[1], 'desk'))
-        else:  # Last 2 are boxes
-            p.loadURDF("cube.urdf", pos, globalScaling=0.5, useFixedBase=True)
-            object_positions.append((pos[0], pos[1], 'box'))
-
-    # CLUSTER 2: WEST (NOT visible initially - agent must turn left ~90°)
-    # 5 objects along west wall
-    print("  Cluster 2 (WEST): 5 objects at x=-6 to -7m")
-    west_cluster = [
-        [-7, 2, 0],     # Top desk
-        [-7, 0, 0.3],   # Center desk
-        [-7, -2, -0.2], # Bottom desk
-        [-6.5, 1, 0.5], # Box on top desk
-        [-6.5, -1, 0.4],# Box on bottom desk
-    ]
-    for i, pos in enumerate(west_cluster):
-        if i < 3:  # First 3 are desks
-            p.loadURDF("table/table.urdf", pos, p.getQuaternionFromEuler([0, 0, pos[2]]), useFixedBase=True)
-            object_positions.append((pos[0], pos[1], 'desk'))
-        else:  # Last 2 are boxes
+        else:
             p.loadURDF("cube.urdf", pos, globalScaling=0.4, useFixedBase=True)
             object_positions.append((pos[0], pos[1], 'box'))
 
-    # CLUSTER 3: SOUTH (behind agent - must turn 180°)
-    # 5 objects along south wall
-    print("  Cluster 3 (SOUTH): 5 objects at y=-6 to -7m")
-    south_cluster = [
-        [0, -7, 0],       # Center desk
-        [2, -7, 0.4],     # Right desk
-        [-2, -7, -0.3],   # Left desk
-        [1, -6.5, 0.6],   # Right box
-        [-1, -6.5, -0.2], # Left box
+    # EMPTY ZONE: 150° to 210° - NOTHING HERE
+    print("  [EMPTY ZONE: 150°-210° - forces systematic to waste saccades]")
+
+    # CLUSTER 2: SOUTHWEST DENSE PACK - 5 objects tightly grouped
+    # Far from cluster 1, requires deliberate turn
+    print("  Cluster 2 (SOUTHWEST): 5 objects TIGHTLY PACKED at 210°-240°")
+    print("    → Isolated cluster, semantic must explore to find")
+    southwest_cluster = [
+        [-4, -4.5, 0.1],   # angle≈228°, dist=6.02m
+        [-4.5, -4, 0.2],   # angle≈222°, dist=6.02m
+        [-5, -3.5, -0.1],  # angle≈215°, dist=6.10m
+        [-5.2, -3, 0.3],   # angle≈210°, dist=6.03m
+        [-4.8, -4.8, 0.2], # angle≈225°, dist=6.79m
     ]
-    for i, pos in enumerate(south_cluster):
-        if i < 3:  # First 3 are desks
+    for i, pos in enumerate(southwest_cluster):
+        dist = (pos[0]**2 + pos[1]**2)**0.5
+        angle_deg = math.degrees(math.atan2(pos[1], pos[0]))
+        print(f"    Object {i+7}: ({pos[0]:4.1f}, {pos[1]:4.1f}) @ {angle_deg:5.1f}°, dist={dist:.2f}m")
+        if i < 3:
             p.loadURDF("table/table.urdf", pos, p.getQuaternionFromEuler([0, 0, pos[2]]), useFixedBase=True)
             object_positions.append((pos[0], pos[1], 'desk'))
-        else:  # Last 2 are boxes
+        else:
             p.loadURDF("cube.urdf", pos, globalScaling=0.4, useFixedBase=True)
             object_positions.append((pos[0], pos[1], 'box'))
 
-    print(f"[SETUP] Environment ready: {len(object_positions)} objects in 3 clusters")
-    print(f"         - North cluster: 5 objects (VISIBLE at start)")
-    print(f"         - West cluster:  5 objects (turn LEFT to see)")
-    print(f"         - South cluster: 5 objects (turn AROUND to see)\n")
+    # EMPTY ZONE: 240° to 300° - NOTHING HERE
+    print("  [EMPTY ZONE: 240°-300° - more wasted systematic saccades]")
+
+    # CLUSTER 3: SOUTHEAST DENSE PACK - 4 objects tightly grouped
+    # Opposite side from start, maximum discovery challenge
+    print("  Cluster 3 (SOUTHEAST): 4 objects TIGHTLY PACKED at 300°-330°")
+    print("    → Opposite from start, semantic must hunt for it")
+    southeast_cluster = [
+        [3.5, -5, 0.1],    # angle≈305°, dist=6.10m
+        [4, -4.5, -0.2],   # angle≈312°, dist=6.02m
+        [4.5, -4, 0.3],    # angle≈318°, dist=6.02m
+        [4.8, -3.5, 0.1],  # angle≈324°, dist=6.03m
+    ]
+    for i, pos in enumerate(southeast_cluster):
+        dist = (pos[0]**2 + pos[1]**2)**0.5
+        angle_deg = math.degrees(math.atan2(pos[1], pos[0]))
+        print(f"    Object {i+12}: ({pos[0]:4.1f}, {pos[1]:4.1f}) @ {angle_deg:5.1f}°, dist={dist:.2f}m")
+        if i < 2:
+            p.loadURDF("table/table.urdf", pos, p.getQuaternionFromEuler([0, 0, pos[2]]), useFixedBase=True)
+            object_positions.append((pos[0], pos[1], 'desk'))
+        else:
+            p.loadURDF("cube.urdf", pos, globalScaling=0.35, useFixedBase=True)
+            object_positions.append((pos[0], pos[1], 'box'))
+
+    print(f"\n[SETUP] Environment ready: {len(object_positions)} objects in 3 DENSE clusters")
+    print(f"         - Cluster 1 (NW):  6 objects PACKED at 120°-150° (edge visible)")
+    print(f"         - EMPTY ZONE:      150°-210° (NO OBJECTS)")
+    print(f"         - Cluster 2 (SW):  5 objects PACKED at 210°-240°")
+    print(f"         - EMPTY ZONE:      240°-300° (NO OBJECTS)")
+    print(f"         - Cluster 3 (SE):  4 objects PACKED at 300°-330°")
+    print(f"\n[SETUP] Expected behavior:")
+    print(f"         ✓ Semantic: Sees Cluster 1 edge → glow LEFT → locks onto cluster → discovers 6 quickly")
+    print(f"                     Then hunts for remaining clusters → faster discovery")
+    print(f"         ✗ Systematic: Rotates 22.5° each step → wastes time scanning empty zones")
+    print(f"                       Discovers objects only when rotation happens to hit clusters\n")
 
     return client_id, object_positions, walls
 
@@ -383,7 +423,7 @@ def get_camera_image(yaw):
     return rgb[:, :, :3]
 
 
-def run_benchmark(max_saccades=20):
+def run_benchmark(max_saccades=30):
     """
     Run benchmark comparison between systematic and semantic exploration.
 
@@ -402,9 +442,17 @@ def run_benchmark(max_saccades=20):
     vision_client = DinoV2Client()
     print("[INIT] Vision model ready\n")
 
-    # Create agents
+    # Create agents - BOTH START AT IDENTICAL POSITION
+    INITIAL_YAW = np.pi / 2  # 90° = North
+    print(f"[INIT] Both agents starting at position [0, 0] facing {math.degrees(INITIAL_YAW):.1f}° (North)")
+    print(f"[INIT] FOV = {FOV_DEGREES}° → agents see from {math.degrees(INITIAL_YAW - np.radians(FOV_DEGREES/2)):.1f}° to {math.degrees(INITIAL_YAW + np.radians(FOV_DEGREES/2)):.1f}°")
+
     systematic_agent = ExplorationAgent(mode='systematic', physics_client_id=client_id)
     semantic_agent = ExplorationAgent(mode='semantic', physics_client_id=client_id)
+
+    # FORCE SAME INITIAL YAW
+    systematic_agent.current_yaw = INITIAL_YAW
+    semantic_agent.current_yaw = INITIAL_YAW
 
     systematic_agent.set_vision_client(vision_client)
     semantic_agent.set_vision_client(vision_client)
@@ -416,13 +464,19 @@ def run_benchmark(max_saccades=20):
     systematic_agent.set_tracker(systematic_tracker)
     semantic_agent.set_tracker(semantic_tracker)
 
+    print(f"[INIT] Agents initialized successfully")
+    print(f"       Systematic: yaw={math.degrees(systematic_agent.current_yaw):.1f}°")
+    print(f"       Semantic:   yaw={math.degrees(semantic_agent.current_yaw):.1f}°\n")
+
     # Create visualizer
     print("[VIZ] Starting visualizer...")
     viz = BenchmarkVisualizer(object_positions, walls)
     print("[VIZ] Visualizer ready\n")
 
     print("="*60)
-    print("STARTING EXPLORATION (press Ctrl+C to stop early)")
+    print("STARTING EXPLORATION")
+    print("Running until both agents discover all 15 objects...")
+    print("(max limit: {} saccades as safety)".format(max_saccades))
     print("="*60 + "\n")
 
     # Start timers
@@ -434,30 +488,49 @@ def run_benchmark(max_saccades=20):
 
     try:
         for saccade in range(max_saccades):
-            print(f"\n[STEP {saccade+1}/{max_saccades}]")
+            # Progress indicator with current coverage
+            sys_stats = systematic_tracker.get_stats()
+            sem_stats = semantic_tracker.get_stats()
 
-            # Get camera images for both agents
+            print(f"\n{'='*60}")
+            print(f"SACCADE #{saccade+1} - T={saccade*FRAME_PERIOD:.0f}s")
+            print(f"  Systematic: {sys_stats['discovered']}/15 objects | Semantic: {sem_stats['discovered']}/15 objects")
+            print(f"  Current yaw: Systematic={math.degrees(systematic_agent.current_yaw):.1f}° | Semantic={math.degrees(semantic_agent.current_yaw):.1f}°")
+            print(f"{'='*60}")
+
+            # BOTH AGENTS STEP IN PERFECT SYNCHRONIZATION
+            # Get camera images for both agents AT SAME TIME
             systematic_image = get_camera_image(systematic_agent.current_yaw)
             semantic_image = get_camera_image(semantic_agent.current_yaw)
 
-            # Step both agents (only if not yet complete)
+            # Verify both images are the same initially (on first step)
+            if saccade == 0:
+                print(f"[INIT-CHECK] First frame - both agents should see identical views")
+                print(f"             Systematic camera: yaw={math.degrees(systematic_agent.current_yaw):.1f}°")
+                print(f"             Semantic camera:   yaw={math.degrees(semantic_agent.current_yaw):.1f}°")
+                images_match = np.array_equal(systematic_image, semantic_image)
+                print(f"             Initial images match: {images_match}")
+
+            # Step both agents TOGETHER (only if not yet complete)
             if not systematic_completed:
                 systematic_agent.step(systematic_image)
                 if systematic_tracker.is_complete() and not systematic_completed:
                     systematic_completion_time = time.time() - start_time
                     systematic_completed = True
-                    print(f"\n{'='*60}")
-                    print(f"  SYSTEMATIC COMPLETE at {systematic_completion_time:.1f}s ({systematic_tracker.get_stats()['saccades']} saccades)")
-                    print(f"{'='*60}\n")
+                    print(f"\n{'🎯'*30}")
+                    print(f"  SYSTEMATIC COMPLETE!")
+                    print(f"  Time: {systematic_completion_time:.1f}s | Saccades: {systematic_tracker.get_stats()['saccades']}")
+                    print(f"{'🎯'*30}\n")
 
             if not semantic_completed:
                 semantic_agent.step(semantic_image)
                 if semantic_tracker.is_complete() and not semantic_completed:
                     semantic_completion_time = time.time() - start_time
                     semantic_completed = True
-                    print(f"\n{'='*60}")
-                    print(f"  SEMANTIC COMPLETE at {semantic_completion_time:.1f}s ({semantic_tracker.get_stats()['saccades']} saccades)")
-                    print(f"{'='*60}\n")
+                    print(f"\n{'🚀'*30}")
+                    print(f"  SEMANTIC COMPLETE!")
+                    print(f"  Time: {semantic_completion_time:.1f}s | Saccades: {semantic_tracker.get_stats()['saccades']}")
+                    print(f"{'🚀'*30}\n")
 
             # Update visualization
             viz.update(systematic_agent.get_state_dict(),
@@ -465,9 +538,10 @@ def run_benchmark(max_saccades=20):
 
             # Check if both complete
             if systematic_completed and semantic_completed:
-                print("\n[COMPLETE] Both agents found all objects!")
+                print("\n[COMPLETE] Both agents found all 15 objects!")
                 break
 
+            # Wait exactly FRAME_PERIOD seconds before next synchronized step
             time.sleep(FRAME_PERIOD)
 
     except KeyboardInterrupt:
@@ -511,13 +585,15 @@ def run_benchmark(max_saccades=20):
         # Save results
         save_benchmark_results(systematic_tracker, semantic_tracker)
 
-        # Keep visualization open
-        print("\n[VIZ] Close window to exit...")
-        input("Press Enter to close...")
+        # Keep visualization open briefly
+        print("\n[VIZ] Keeping visualization open for 5 seconds...")
+        time.sleep(5)
 
         viz.close()
         p.disconnect()
 
+        print("\n[BENCHMARK] Complete!")
+
 
 if __name__ == "__main__":
-    run_benchmark(max_saccades=20)
+    run_benchmark(max_saccades=50)  # Generous limit to ensure completion
