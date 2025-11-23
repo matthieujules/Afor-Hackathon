@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Semantix Dashboard - The Panopticon</title>
     <link rel="stylesheet" href="/static/dashboard.css">
 </head>
+
 <body>
     <div class="header">
         <h1>Semantix: The Panopticon</h1>
@@ -19,9 +21,9 @@
     <div class="dashboard-grid">
         <!-- Row 1 -->
         <div class="panel">
-            <div class="panel-header">Live Feed (~10 FPS)</div>
+            <div class="panel-header">Top-Down View (Every 5s)</div>
             <div class="panel-content">
-                <img id="live-feed" src="" alt="Live camera feed">
+                <img id="topdown-view" src="" alt="Top-down semantic map">
             </div>
         </div>
 
@@ -83,6 +85,10 @@
                 <div class="metric-row">
                     <span class="metric-label">Glow Score:</span>
                     <span id="glow-score" class="metric-value">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">System Status:</span>
+                    <span id="system-status" class="metric-value status-active">--</span>
                 </div>
                 <div class="metric-row">
                     <span class="metric-label">Frames Received:</span>
@@ -167,8 +173,8 @@
             document.getElementById('frame-count').textContent = frameCount;
 
             // Update images (base64 encoded)
-            if (data.live_feed) {
-                document.getElementById('live-feed').src = `data:image/png;base64,${data.live_feed}`;
+            if (data.topdown_view) {
+                document.getElementById('topdown-view').src = `data:image/png;base64,${data.topdown_view}`;
             }
 
             if (data.snapshot) {
@@ -220,6 +226,17 @@
                 if (m.glow_score !== undefined) {
                     document.getElementById('glow-score').textContent = m.glow_score.toFixed(1);
                 }
+
+                if (m.status) {
+                    const statusEl = document.getElementById('system-status');
+                    statusEl.textContent = m.status;
+                    // Add animation/color based on content
+                    if (m.status.includes("Saccading")) {
+                        statusEl.style.color = "#ff4444"; // Red for action
+                    } else {
+                        statusEl.style.color = "#00ff00"; // Green for idle
+                    }
+                }
             }
         }
 
@@ -227,4 +244,5 @@
         connect();
     </script>
 </body>
+
 </html>

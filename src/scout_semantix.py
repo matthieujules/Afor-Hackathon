@@ -199,6 +199,86 @@ def numpy_to_base64_png(img_array):
     img_base64 = base64.b64encode(buf.read()).decode('utf-8')
     return img_base64
 
+def create_topdown_view(robot_pos, robot_yaw, interest_map, seen_map, glow_map):
+    """
+    Create top-down visualization of the robot's world understanding.
+    Shows: robot position/orientation, FOV cone, interestingness heatmap
+    """
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=100)
+
+    # Create composite visualization: interest map with glow overlay
+    # Normalize maps for visualization
+    interest_normalized = np.clip(interest_map, 0, 1)
+    glow_normalized = np.clip(glow_map, 0, 1)
+
+    # Create RGB composite: interest (red channel), glow (green channel), seen (blue channel)
+    composite = np.zeros((GRID_SIZE, GRID_SIZE, 3))
+    composite[:, :, 0] = interest_normalized  # Red = interest
+    composite[:, :, 1] = glow_normalized * 0.7  # Green = glow (dimmer)
+    composite[:, :, 2] = seen_map * 0.3  # Blue = coverage (subtle)
+
+    # Display composite
+    ax.imshow(composite, origin='lower', extent=[-WORLD_SIZE/2, WORLD_SIZE/2, -WORLD_SIZE/2, WORLD_SIZE/2])
+
+    # Draw robot position (center)
+    robot_x, robot_y = robot_pos
+    ax.plot(robot_x, robot_y, 'wo', markersize=12, markeredgewidth=2, markeredgecolor='cyan')
+
+    # Draw FOV cone
+    cone_length = MAX_RANGE
+    cone_angle = np.radians(FOV_DEGREES)
+
+    # Cone edges
+    left_angle = robot_yaw + cone_angle / 2
+    right_angle = robot_yaw - cone_angle / 2
+
+    # Cone vertices
+    cone_x = [robot_x,
+              robot_x + cone_length * np.cos(left_angle),
+              robot_x + cone_length * np.cos(right_angle)]
+    cone_y = [robot_y,
+              robot_y + cone_length * np.sin(left_angle),
+              robot_y + cone_length * np.sin(right_angle)]
+
+    ax.fill(cone_x, cone_y, color='cyan', alpha=0.2, edgecolor='cyan', linewidth=2)
+
+    # Draw heading direction arrow
+    arrow_length = 2.0
+    ax.arrow(robot_x, robot_y,
+             arrow_length * np.cos(robot_yaw),
+             arrow_length * np.sin(robot_yaw),
+             head_width=0.5, head_length=0.3, fc='yellow', ec='yellow', linewidth=2)
+
+    # Add grid lines
+    ax.grid(True, alpha=0.3, color='white', linewidth=0.5)
+
+    # Labels and title
+    ax.set_xlim(-WORLD_SIZE/2, WORLD_SIZE/2)
+    ax.set_ylim(-WORLD_SIZE/2, WORLD_SIZE/2)
+    ax.set_xlabel('X (meters)', color='white', fontsize=10)
+    ax.set_ylabel('Y (meters)', color='white', fontsize=10)
+    ax.set_title('Top-Down View\nRed=Interest | Green=Glow | Blue=Seen',
+                 color='white', fontsize=12, pad=10)
+
+    # Dark background
+    ax.set_facecolor('#1a1a1a')
+    fig.patch.set_facecolor('#1a1a1a')
+    ax.tick_params(colors='white', labelsize=8)
+
+    # Add compass
+    ax.text(WORLD_SIZE/2 - 1, WORLD_SIZE/2 - 1, 'N', color='white', fontsize=14,
+            ha='center', va='center', weight='bold')
+
+    plt.tight_layout()
+
+    # Convert to base64
+    buf = BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', facecolor='#1a1a1a')
+    plt.close(fig)
+
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode('utf-8')
+
 # ============================================================================
 # MAPPING UTILITIES
 # ============================================================================
@@ -367,53 +447,98 @@ def setup_env():
     p.loadURDF("plane.urdf")
     print("[SETUP] Ground plane loaded")
 
-    # Walls - proper 20x20m enclosure with grounded walls
-    print("[SETUP] Loading walls...")
-    # Walls are 10m cubes, centered at z=5 (bottom at z=0, top at z=10)
-    # Positioned at ±10m to create 20x20m enclosure
-    p.loadURDF("cube.urdf", [10, 0, 5], globalScaling=10)  # East wall
-    p.loadURDF("cube.urdf", [-10, 0, 5], globalScaling=10)  # West wall
-    p.loadURDF("cube.urdf", [0, 10, 5], globalScaling=10)  # North wall
-    p.loadURDF("cube.urdf", [0, -10, 5], globalScaling=10)  # South wall
-    print("[SETUP] Walls created (20m x 20m enclosure)")
+    # Walls - REMOVED per user request for simplification
+    # p.loadURDF("cube.urdf", [10, 0, 5], globalScaling=10)  # East wall
+    # p.loadURDF("cube.urdf", [-10, 0, 5], globalScaling=10)  # West wall
+    # p.loadURDF("cube.urdf", [0, 10, 5], globalScaling=10)  # North wall
+    # p.loadURDF("cube.urdf", [0, -10, 5], globalScaling=10)  # South wall
+    print("[SETUP] Walls removed (Open world)")
 
-    # === INTERESTING ZONE (Right/East) ===
-    print("[SETUP] Creating interesting zone (East)...")
-    # Cluttered area with boxes - visible from robot at origin
-    for i in range(5):
-        x = 4 + i  # X: 4 to 8 meters east
-        y = -2 + i * 0.8  # Y: -2 to +1 meters
-        box_id = p.loadURDF("cube.urdf", [x, y, 0.5], globalScaling=1.0)
-        print(f"  Box {i+1} at ({x:.1f}, {y:.1f}, 0.5)")
+    # === MANUAL SCENE LAYOUT ===
+    print("[SETUP] Spawning MANUAL complex scene with large objects...")
 
-    # Trail of ducks leading to clutter - robot should follow this
-    print("[SETUP] Creating duck trail...")
-    for i in range(5):
-        x = 1 + i  # X: 1 to 5 meters east
-        y = -1 + i * 0.3  # Y: -1 to +0.2 meters
-        duck_id = p.loadURDF("duck_vhacd.urdf", [x, y, 0.5], globalScaling=2.0)
-        print(f"  Duck {i+1} at ({x:.1f}, {y:.1f}, 0.5)")
+    # 1. The "Office Cluster" (North-East) - Corner case: desk and bench meeting
+    p.loadURDF("table/table.urdf", [3, 5, 0], p.getQuaternionFromEuler([0, 0, 0.3]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [1.5, 4.5, 0], p.getQuaternionFromEuler([0, 0, 1.8]), useFixedBase=True)
+    # Add ducks on tables for visual interest
+    p.loadURDF("duck_vhacd.urdf", [3, 5, 0.7], globalScaling=2.0, useFixedBase=True)
+    p.loadURDF("duck_vhacd.urdf", [1.5, 4.5, 0.7], globalScaling=2.0, useFixedBase=True)
+    print("  Office Cluster (North-East)")
 
-    # === BORING ZONE (West) ===
-    # Empty
+    # 2. The "Warehouse Zone" (East) - Scattered barrels and crates
+    # Large barrels (spheres) at different heights and positions
+    p.loadURDF("sphere2.urdf", [6, 0.5, 0.8], globalScaling=1.5, useFixedBase=True)
+    p.loadURDF("sphere2.urdf", [6.5, -1.2, 0.8], globalScaling=1.5, useFixedBase=True)
+    p.loadURDF("sphere2.urdf", [5.2, 1.8, 0.8], globalScaling=1.5, useFixedBase=True)
+    # Tray boxes as crates
+    p.loadURDF("tray/traybox.urdf", [7, 0, 0], globalScaling=2.0, useFixedBase=True)
+    p.loadURDF("tray/traybox.urdf", [5.5, -0.8, 0], globalScaling=1.8, useFixedBase=True)
+    # Teddy bear on top of crate (visual interest)
+    p.loadURDF("teddy_vhacd.urdf", [7, 0, 1.2], globalScaling=3.0, useFixedBase=True)
+    print("  Warehouse Zone (East)")
 
-    # === ROBOT (FIXED BASE PANOPTICON) ===
-    # useFixedBase=True prevents physics from fighting manual rotation
-    # Robot is anchored at origin, rotates on yaw axis only
-    print("[SETUP] Spawning Panopticon Agent (Fixed Base)...")
-    robot_id = p.loadURDF("r2d2.urdf", [0, 0, 0.5], useFixedBase=True)
-    print(f"[SETUP] Robot ID: {robot_id} (Fixed at origin)")
+    # 3. The "Reading Nook" (South-West) - Corner case: bench + bookshelf adjacent
+    # Bench (long table rotated)
+    p.loadURDF("table/table.urdf", [-2, -5, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
+    # "Bookshelf" (vertical tray boxes stacked)
+    p.loadURDF("tray/traybox.urdf", [-3.5, -4.8, 0], p.getQuaternionFromEuler([0, 0, 1.57]), globalScaling=2.5, useFixedBase=True)
+    p.loadURDF("tray/traybox.urdf", [-3.5, -4.8, 1.5], p.getQuaternionFromEuler([0, 0, 1.57]), globalScaling=2.5, useFixedBase=True)
+    # Ducks on bench
+    p.loadURDF("duck_vhacd.urdf", [-1.8, -5, 0.7], globalScaling=1.8, useFixedBase=True)
+    p.loadURDF("duck_vhacd.urdf", [-2.2, -5, 0.7], globalScaling=1.8, useFixedBase=True)
+    print("  Reading Nook (South-West) - Bench + Bookshelf corner case")
 
-    return robot_id
+    # 4. The "Storage Yard" (South) - Scattered large objects
+    p.loadURDF("sphere2.urdf", [2, -6, 0.8], globalScaling=1.6, useFixedBase=True)
+    p.loadURDF("tray/traybox.urdf", [0.5, -6.5, 0], globalScaling=2.2, useFixedBase=True)
+    p.loadURDF("teddy_vhacd.urdf", [-1, -6, 0.5], globalScaling=2.5, useFixedBase=True)
+    print("  Storage Yard (South)")
+
+    # 5. The "Central Hub" - Mixed objects creating occlusion challenges
+    p.loadURDF("table/table.urdf", [1, 0.5, 0], p.getQuaternionFromEuler([0, 0, 0.8]), useFixedBase=True)
+    p.loadURDF("sphere2.urdf", [-1.5, 1, 0.8], globalScaling=1.4, useFixedBase=True)
+    p.loadURDF("tray/traybox.urdf", [-0.5, -1.5, 0], globalScaling=1.9, useFixedBase=True)
+    # Duck trail leading from center to east (creates visual continuity for glow)
+    p.loadURDF("duck_vhacd.urdf", [2, 0.2, 0.5], globalScaling=1.5, useFixedBase=True)
+    p.loadURDF("duck_vhacd.urdf", [3.5, 0.4, 0.5], globalScaling=1.5, useFixedBase=True)
+    p.loadURDF("duck_vhacd.urdf", [4.8, 0.3, 0.5], globalScaling=1.5, useFixedBase=True)
+    print("  Central Hub - Visual continuity trail")
+
+    # 6. The "North-West Corner" - Table and barrel grouping
+    p.loadURDF("table/table.urdf", [-4, 4, 0], p.getQuaternionFromEuler([0, 0, 2.3]), useFixedBase=True)
+    p.loadURDF("sphere2.urdf", [-5.5, 3.5, 0.8], globalScaling=1.5, useFixedBase=True)
+    p.loadURDF("sphere2.urdf", [-3.2, 5, 0.8], globalScaling=1.3, useFixedBase=True)
+    print("  North-West Corner")
+
+    # 7. The "West Corridor" - Linear arrangement with varying objects
+    p.loadURDF("tray/traybox.urdf", [-6, 0.5, 0], globalScaling=2.0, useFixedBase=True)
+    p.loadURDF("teddy_vhacd.urdf", [-5.5, -1, 0.5], globalScaling=2.8, useFixedBase=True)
+    p.loadURDF("sphere2.urdf", [-6.2, -2.5, 0.8], globalScaling=1.5, useFixedBase=True)
+    p.loadURDF("table/table.urdf", [-5, 2, 0], p.getQuaternionFromEuler([0, 0, 1.2]), useFixedBase=True)
+    print("  West Corridor")
+
+    # 8. The "North Zone" - Dense cluster for high visual complexity
+    p.loadURDF("tray/traybox.urdf", [0, 6.5, 0], globalScaling=2.1, useFixedBase=True)
+    p.loadURDF("duck_vhacd.urdf", [0.5, 7, 0.5], globalScaling=2.2, useFixedBase=True)
+    p.loadURDF("sphere2.urdf", [-1, 6.8, 0.8], globalScaling=1.4, useFixedBase=True)
+    print("  North Dense Zone")
+
+    # === EMPTY ZONES for contrast ===
+    # South-East corner intentionally empty
+    # Far West intentionally sparse
+    print("  Empty zones: South-East corner, Far West (for exploration contrast)")
+
+    # === ROBOT (REMOVED) ===
+    # We are now just a disembodied camera at the origin.
+    print("[SETUP] Robot body removed. Using pure camera.")
+    
+    return None
 
 def get_camera_image(robot_id, yaw):
-    """Render camera view from robot head, oriented according to yaw."""
-    # Camera positioned at robot head
-    # Camera positioned at robot head (adjusted to be above/outside R2D2 body)
-    cam_height = 1.2
-    # Move camera slightly forward to avoid clipping self
-    cam_offset = 0.6 
-    pos = [cam_offset * np.cos(yaw), cam_offset * np.sin(yaw), cam_height]
+    """Render camera view from fixed position, oriented according to yaw."""
+    # Camera positioned at origin, slightly elevated
+    cam_height = 1.5
+    pos = [0, 0, cam_height]
 
     # Target point 2m away in the direction robot is facing
     target_distance = 2.0
@@ -470,38 +595,24 @@ def main():
     print("Open browser to: http://localhost:8080")
     print("="*60 + "\n")
 
-    # Set initial robot orientation
-    quat = p.getQuaternionFromEuler([0, 0, current_yaw])
-    p.resetBasePositionAndOrientation(robot_id, [0, 0, 0.5], quat)
+    # Set initial robot orientation - No robot to reset
+    # quat = p.getQuaternionFromEuler([0, 0, current_yaw])
+    # p.resetBasePositionAndOrientation(robot_id, [0, 0, 0.5], quat)
 
     step = 0
     last_yaw = current_yaw  # Track when rotation actually changes
     last_snapshot = None
     last_analysis = {}
+    last_analysis_time = time.time()  # Track time-based triggering
 
     try:
         while True:
             # Step physics (affects ducks/boxes, but robot is fixed base)
             p.stepSimulation()
 
-            # Live feed update (~10 FPS at 20Hz sim speed)
-            if step % 2 == 0:
-                live_rgb = get_camera_image(robot_id, current_yaw)
-
-                # Send to dashboard
-                if ws_client:
-                    ws_client.send({
-                        'timestamp': time.time(),
-                        'live_feed': numpy_to_base64_png(live_rgb),
-                        'snapshot': last_snapshot,
-                        'metrics': {
-                            'current_heading': math.degrees(current_yaw),
-                            **last_analysis
-                        }
-                    })
-
-            # Full vision analysis (every ~5 seconds)
-            if step % 100 == 0:
+            # Full vision analysis (time-based: every FRAME_PERIOD seconds)
+            current_time = time.time()
+            if current_time - last_analysis_time >= FRAME_PERIOD:
 
                 # 1. Capture snapshot for analysis
                 rgb = get_camera_image(robot_id, current_yaw)
@@ -534,8 +645,8 @@ def main():
                 if s_glow > s_ent:
                     reason = "Curiosity (Following Glow)"
 
-                print(f"  Decision: {reason}")
-                print(f"  Saccading to {math.degrees(next_yaw):.1f}° (Ent: {s_ent:.1f}, Glow: {s_glow:.1f})")
+                print(f"  EXPLORATION LOG: Decision: {reason}")
+                print(f"  EXPLORATION LOG: Saccading to {math.degrees(next_yaw):.1f}° (Ent: {s_ent:.1f}, Glow: {s_glow:.1f})")
 
                 # Store metrics for dashboard
                 last_analysis = {
@@ -546,10 +657,13 @@ def main():
                     'glow_score': s_glow
                 }
 
+                # Generate top-down view
+                topdown_view = create_topdown_view([0, 0], current_yaw, interest_map, seen_map, glow_map)
+
                 # Send complete update with visualizations
                 dashboard_data = {
                     'timestamp': time.time(),
-                    'live_feed': numpy_to_base64_png(rgb),
+                    'topdown_view': topdown_view,  # Replace live_feed with top-down
                     'snapshot': last_snapshot,
                     'metrics': {
                         'current_heading': math.degrees(current_yaw),
@@ -582,9 +696,13 @@ def main():
 
                 # Only update robot rotation if yaw changed
                 if abs(current_yaw - last_yaw) > 0.01:
-                    quat = p.getQuaternionFromEuler([0, 0, current_yaw])
-                    p.resetBasePositionAndOrientation(robot_id, [0, 0, 0.5], quat)
+                    # No robot body to rotate anymore
+                    # quat = p.getQuaternionFromEuler([0, 0, current_yaw])
+                    # p.resetBasePositionAndOrientation(robot_id, [0, 0, 0.5], quat)
                     last_yaw = current_yaw
+
+                # Reset analysis timer for next cycle
+                last_analysis_time = time.time()
 
             time.sleep(0.01)
             step += 1
