@@ -233,16 +233,21 @@ class DinoV2Client(BaseVisionClient):
             right_edge = energy[:, -2:].mean().item()
             center = energy[:, 4:-4].mean().item()
 
-            # Determine lead direction
+            # Determine lead direction (MADE MORE SENSITIVE)
             lead = 'none'
-            edge_threshold = center * 1.15
+            edge_threshold = center * 1.05  # Lower threshold (was 1.15)
 
-            if left_edge > edge_threshold and left_edge > right_edge * 1.2:
+            if left_edge > edge_threshold and left_edge > right_edge * 1.1:  # Lower ratio (was 1.2)
                 lead = 'left'
-            elif right_edge > edge_threshold and right_edge > left_edge * 1.2:
+                print(f"    [LEAD] LEFT detected: left={left_edge:.2f}, right={right_edge:.2f}, center={center:.2f}")
+            elif right_edge > edge_threshold and right_edge > left_edge * 1.1:  # Lower ratio (was 1.2)
                 lead = 'right'
+                print(f"    [LEAD] RIGHT detected: left={left_edge:.2f}, right={right_edge:.2f}, center={center:.2f}")
             elif max(left_edge, right_edge) > edge_threshold:
                 lead = 'center'
+                print(f"    [LEAD] CENTER detected: left={left_edge:.2f}, right={right_edge:.2f}, center={center:.2f}")
+            else:
+                print(f"    [LEAD] NONE: left={left_edge:.2f}, right={right_edge:.2f}, center={center:.2f}")
 
             # === VISUALIZATIONS (Added for DINOv2) ===
             import numpy as np

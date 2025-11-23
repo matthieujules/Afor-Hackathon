@@ -25,6 +25,7 @@ import math
 import threading
 import asyncio
 import base64
+import glob
 from io import BytesIO
 
 # Use Agg backend for matplotlib (headless rendering)
@@ -92,6 +93,9 @@ glow_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
 # Robot State
 current_yaw = 0.0 # radians
+
+# Object tracking for visualization
+object_positions = []  # List of (x, y, type) tuples
 
 # ============================================================================
 # WEBSOCKET CLIENT
@@ -214,7 +218,7 @@ def create_topdown_view(robot_pos, robot_yaw, interest_map, seen_map, glow_map):
     # Create RGB composite: interest (red channel), glow (green channel), seen (blue channel)
     composite = np.zeros((GRID_SIZE, GRID_SIZE, 3))
     composite[:, :, 0] = interest_normalized  # Red = interest
-    composite[:, :, 1] = glow_normalized * 0.7  # Green = glow (dimmer)
+    composite[:, :, 1] = glow_normalized * 2.0  # Green = glow (BOOSTED for visibility)
     composite[:, :, 2] = seen_map * 0.3  # Blue = coverage (subtle)
 
     # Display composite
@@ -431,6 +435,45 @@ def choose_next_angle(robot_pos, current_heading):
 # PYBULLET ENV
 # ============================================================================
 
+def load_stl_mesh(stl_path, position=[0, 0, 0], orientation=[0, 0, 0, 1], scale=1.0, mass=0.0):
+    """
+    Load an STL file as a mesh in PyBullet.
+    
+    Args:
+        stl_path: Path to the STL file (relative or absolute)
+        position: [x, y, z] position in world coordinates
+        orientation: [x, y, z, w] quaternion orientation (default: no rotation)
+        scale: Scaling factor for the mesh (default: 1.0)
+        mass: Mass of the object (0.0 = static/kinematic, >0 = dynamic)
+    
+    Returns:
+        body_id: PyBullet body ID of the loaded mesh
+    """
+    # Create collision shape from STL
+    collision_shape = p.createCollisionShape(
+        shapeType=p.GEOM_MESH,
+        fileName=stl_path,
+        meshScale=[scale, scale, scale]
+    )
+    
+    # Create visual shape from STL (for rendering)
+    visual_shape = p.createVisualShape(
+        shapeType=p.GEOM_MESH,
+        fileName=stl_path,
+        meshScale=[scale, scale, scale]
+    )
+    
+    # Create multi-body from the shapes
+    body_id = p.createMultiBody(
+        baseMass=mass,
+        baseCollisionShapeIndex=collision_shape,
+        baseVisualShapeIndex=visual_shape,
+        basePosition=position,
+        baseOrientation=orientation
+    )
+    
+    return body_id
+
 def setup_env():
     print("[SETUP] Connecting to PyBullet GUI...")
     p.connect(p.GUI)
@@ -455,83 +498,76 @@ def setup_env():
     print("[SETUP] Walls removed (Open world)")
 
     # === MANUAL SCENE LAYOUT ===
-    print("[SETUP] Spawning MANUAL complex scene with large objects...")
+    print("[SETUP] Spawning scene - Desks and black boxes only...")
 
-    # 1. The "Office Cluster" (North-East) - Corner case: desk and bench meeting
-    p.loadURDF("table/table.urdf", [3, 5, 0], p.getQuaternionFromEuler([0, 0, 0.3]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [1.5, 4.5, 0], p.getQuaternionFromEuler([0, 0, 1.8]), useFixedBase=True)
-    # Add ducks on tables for visual interest
-    p.loadURDF("duck_vhacd.urdf", [3, 5, 0.7], globalScaling=2.0, useFixedBase=True)
-    p.loadURDF("duck_vhacd.urdf", [1.5, 4.5, 0.7], globalScaling=2.0, useFixedBase=True)
-    print("  Office Cluster (North-East)")
+    # 1. East Zone - Dense desk cluster with box trail
+    p.loadURDF("table/table.urdf", [5, 0, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [6.5, 0.5, 0], p.getQuaternionFromEuler([0, 0, 0.5]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [5.2, -1.5, 0], p.getQuaternionFromEuler([0, 0, -0.3]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [7, -1, 0], p.getQuaternionFromEuler([0, 0, 1.2]), useFixedBase=True)
+    # Black boxes on desks
+    p.loadURDF("cube.urdf", [5, 0, 0.7], globalScaling=0.5, useFixedBase=True)
+    p.loadURDF("cube.urdf", [6.5, 0.5, 0.7], globalScaling=0.6, useFixedBase=True)
+    p.loadURDF("cube.urdf", [5.2, -1.5, 0.7], globalScaling=0.5, useFixedBase=True)
+    print("  East Zone")
 
-    # 2. The "Warehouse Zone" (East) - Scattered barrels and crates
-    # Large barrels (spheres) at different heights and positions
-    p.loadURDF("sphere2.urdf", [6, 0.5, 0.8], globalScaling=1.5, useFixedBase=True)
-    p.loadURDF("sphere2.urdf", [6.5, -1.2, 0.8], globalScaling=1.5, useFixedBase=True)
-    p.loadURDF("sphere2.urdf", [5.2, 1.8, 0.8], globalScaling=1.5, useFixedBase=True)
-    # Tray boxes as crates
-    p.loadURDF("tray/traybox.urdf", [7, 0, 0], globalScaling=2.0, useFixedBase=True)
-    p.loadURDF("tray/traybox.urdf", [5.5, -0.8, 0], globalScaling=1.8, useFixedBase=True)
-    # Teddy bear on top of crate (visual interest)
-    p.loadURDF("teddy_vhacd.urdf", [7, 0, 1.2], globalScaling=3.0, useFixedBase=True)
-    print("  Warehouse Zone (East)")
+    # 2. North Zone - Desk rows
+    p.loadURDF("table/table.urdf", [0, 6, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [2, 6.5, 0], p.getQuaternionFromEuler([0, 0, 0.2]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [-2, 6.2, 0], p.getQuaternionFromEuler([0, 0, -0.2]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [1, 4.5, 0], p.getQuaternionFromEuler([0, 0, 0.8]), useFixedBase=True)
+    # Black boxes
+    p.loadURDF("cube.urdf", [0, 6, 0.7], globalScaling=0.5, useFixedBase=True)
+    p.loadURDF("cube.urdf", [2, 6.5, 0.7], globalScaling=0.5, useFixedBase=True)
+    p.loadURDF("cube.urdf", [-2, 6.2, 0.7], globalScaling=0.6, useFixedBase=True)
+    print("  North Zone")
 
-    # 3. The "Reading Nook" (South-West) - Corner case: bench + bookshelf adjacent
-    # Bench (long table rotated)
-    p.loadURDF("table/table.urdf", [-2, -5, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
-    # "Bookshelf" (vertical tray boxes stacked)
-    p.loadURDF("tray/traybox.urdf", [-3.5, -4.8, 0], p.getQuaternionFromEuler([0, 0, 1.57]), globalScaling=2.5, useFixedBase=True)
-    p.loadURDF("tray/traybox.urdf", [-3.5, -4.8, 1.5], p.getQuaternionFromEuler([0, 0, 1.57]), globalScaling=2.5, useFixedBase=True)
-    # Ducks on bench
-    p.loadURDF("duck_vhacd.urdf", [-1.8, -5, 0.7], globalScaling=1.8, useFixedBase=True)
-    p.loadURDF("duck_vhacd.urdf", [-2.2, -5, 0.7], globalScaling=1.8, useFixedBase=True)
-    print("  Reading Nook (South-West) - Bench + Bookshelf corner case")
+    # 3. West Zone - Scattered desks
+    p.loadURDF("table/table.urdf", [-5, 0, 0], p.getQuaternionFromEuler([0, 0, 1.5]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [-6.5, 1.5, 0], p.getQuaternionFromEuler([0, 0, 0.5]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [-5.5, -1.5, 0], p.getQuaternionFromEuler([0, 0, -0.8]), useFixedBase=True)
+    # Black boxes
+    p.loadURDF("cube.urdf", [-5, 0, 0.7], globalScaling=0.5, useFixedBase=True)
+    p.loadURDF("cube.urdf", [-6.5, 1.5, 0.7], globalScaling=0.6, useFixedBase=True)
+    p.loadURDF("cube.urdf", [-5.5, -1.5, 0.7], globalScaling=0.5, useFixedBase=True)
+    print("  West Zone")
 
-    # 4. The "Storage Yard" (South) - Scattered large objects
-    p.loadURDF("sphere2.urdf", [2, -6, 0.8], globalScaling=1.6, useFixedBase=True)
-    p.loadURDF("tray/traybox.urdf", [0.5, -6.5, 0], globalScaling=2.2, useFixedBase=True)
-    p.loadURDF("teddy_vhacd.urdf", [-1, -6, 0.5], globalScaling=2.5, useFixedBase=True)
-    print("  Storage Yard (South)")
+    # 4. South Zone
+    p.loadURDF("table/table.urdf", [0, -5.5, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [2, -6, 0], p.getQuaternionFromEuler([0, 0, 0.7]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [-2, -5.8, 0], p.getQuaternionFromEuler([0, 0, -0.5]), useFixedBase=True)
+    # Black boxes
+    p.loadURDF("cube.urdf", [0, -5.5, 0.7], globalScaling=0.5, useFixedBase=True)
+    p.loadURDF("cube.urdf", [2, -6, 0.7], globalScaling=0.6, useFixedBase=True)
+    print("  South Zone")
 
-    # 5. The "Central Hub" - Mixed objects creating occlusion challenges
-    p.loadURDF("table/table.urdf", [1, 0.5, 0], p.getQuaternionFromEuler([0, 0, 0.8]), useFixedBase=True)
-    p.loadURDF("sphere2.urdf", [-1.5, 1, 0.8], globalScaling=1.4, useFixedBase=True)
-    p.loadURDF("tray/traybox.urdf", [-0.5, -1.5, 0], globalScaling=1.9, useFixedBase=True)
-    # Duck trail leading from center to east (creates visual continuity for glow)
-    p.loadURDF("duck_vhacd.urdf", [2, 0.2, 0.5], globalScaling=1.5, useFixedBase=True)
-    p.loadURDF("duck_vhacd.urdf", [3.5, 0.4, 0.5], globalScaling=1.5, useFixedBase=True)
-    p.loadURDF("duck_vhacd.urdf", [4.8, 0.3, 0.5], globalScaling=1.5, useFixedBase=True)
-    print("  Central Hub - Visual continuity trail")
+    # 5. Central Zone - CRITICAL: Box trail for visual continuity testing
+    p.loadURDF("table/table.urdf", [2, 1.5, 0], p.getQuaternionFromEuler([0, 0, 0.3]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [-1.5, 1.5, 0], p.getQuaternionFromEuler([0, 0, 1.8]), useFixedBase=True)
+    p.loadURDF("table/table.urdf", [0.5, -2, 0], p.getQuaternionFromEuler([0, 0, -1.2]), useFixedBase=True)
+    # TRAIL OF BOXES: This should trigger "right" lead_direction when looking from center
+    p.loadURDF("cube.urdf", [1, 0, 0.5], globalScaling=0.7, useFixedBase=True)
+    p.loadURDF("cube.urdf", [2.5, 0.2, 0.5], globalScaling=0.7, useFixedBase=True)
+    p.loadURDF("cube.urdf", [3.8, 0.1, 0.5], globalScaling=0.7, useFixedBase=True)
+    p.loadURDF("cube.urdf", [5.2, 0.3, 0.5], globalScaling=0.7, useFixedBase=True)
+    # More boxes on desks
+    p.loadURDF("cube.urdf", [2, 1.5, 0.7], globalScaling=0.5, useFixedBase=True)
+    p.loadURDF("cube.urdf", [-1.5, 1.5, 0.7], globalScaling=0.5, useFixedBase=True)
+    print("  Central Zone - Box trail for glow testing")
 
-    # 6. The "North-West Corner" - Table and barrel grouping
-    p.loadURDF("table/table.urdf", [-4, 4, 0], p.getQuaternionFromEuler([0, 0, 2.3]), useFixedBase=True)
-    p.loadURDF("sphere2.urdf", [-5.5, 3.5, 0.8], globalScaling=1.5, useFixedBase=True)
-    p.loadURDF("sphere2.urdf", [-3.2, 5, 0.8], globalScaling=1.3, useFixedBase=True)
-    print("  North-West Corner")
+    # 6. Additional standalone boxes
+    p.loadURDF("cube.urdf", [-3, 3, 0.5], globalScaling=0.8, useFixedBase=True)
+    p.loadURDF("cube.urdf", [3.5, -3, 0.5], globalScaling=0.7, useFixedBase=True)
+    p.loadURDF("cube.urdf", [-4, -2, 0.5], globalScaling=0.6, useFixedBase=True)
+    print("  Additional boxes")
 
-    # 7. The "West Corridor" - Linear arrangement with varying objects
-    p.loadURDF("tray/traybox.urdf", [-6, 0.5, 0], globalScaling=2.0, useFixedBase=True)
-    p.loadURDF("teddy_vhacd.urdf", [-5.5, -1, 0.5], globalScaling=2.8, useFixedBase=True)
-    p.loadURDF("sphere2.urdf", [-6.2, -2.5, 0.8], globalScaling=1.5, useFixedBase=True)
-    p.loadURDF("table/table.urdf", [-5, 2, 0], p.getQuaternionFromEuler([0, 0, 1.2]), useFixedBase=True)
-    print("  West Corridor")
-
-    # 8. The "North Zone" - Dense cluster for high visual complexity
-    p.loadURDF("tray/traybox.urdf", [0, 6.5, 0], globalScaling=2.1, useFixedBase=True)
-    p.loadURDF("duck_vhacd.urdf", [0.5, 7, 0.5], globalScaling=2.2, useFixedBase=True)
-    p.loadURDF("sphere2.urdf", [-1, 6.8, 0.8], globalScaling=1.4, useFixedBase=True)
-    print("  North Dense Zone")
-
-    # === EMPTY ZONES for contrast ===
-    # South-East corner intentionally empty
-    # Far West intentionally sparse
-    print("  Empty zones: South-East corner, Far West (for exploration contrast)")
+    # === EMPTY ZONE ===
+    print("  Empty zone: South-East corner")
 
     # === ROBOT (REMOVED) ===
     # We are now just a disembodied camera at the origin.
     print("[SETUP] Robot body removed. Using pure camera.")
-    
+
     return None
 
 def get_camera_image(robot_id, yaw):
@@ -637,6 +673,11 @@ def main():
 
                 # 4. Project Glow (Curiosity)
                 project_glow([0,0], current_yaw, lead)
+
+                # Debug: Check glow map
+                glow_max = glow_map.max()
+                glow_sum = glow_map.sum()
+                print(f"  DEBUG Glow: max={glow_max:.3f}, sum={glow_sum:.1f}, lead={lead}")
 
                 # 5. Plan Next Saccade
                 next_yaw, score, (s_ent, s_glow) = choose_next_angle([0,0], current_yaw)
