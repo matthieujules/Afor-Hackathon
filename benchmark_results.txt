@@ -1,0 +1,31 @@
+============================================================
+SEMANTIX EXPLORATION BENCHMARK RESULTS
+============================================================
+
+SYSTEMATIC SCAN (Baseline):
+  Total Saccades: 9
+  Objects Discovered: 15/15
+  Final Coverage: 100.0%
+  Efficiency: 1.67 objects/saccade
+
+SEMANTIC CURIOSITY (Ours):
+  Total Saccades: 9
+  Objects Discovered: 15/15
+  Final Coverage: 100.0%
+  Efficiency: 1.67 objects/saccade
+
+COMPARISON:
+  Improvement: +0.0%
+  Saccades Saved: 0
+
+DISCOVERY ORDER (Semantic):
+  Saccade  0: desk   at (  0.0,   7.0)
+  Saccade  0: desk   at ( -2.0,   6.5)
+  Saccade  0: desk   at (  2.0,   6.5)
+  Saccade  0: box    at ( -1.0,   7.0)
+  Saccade  0: box    at (  1.0,   7.0)
+  Saccade  2: desk   at (  2.0,  -7.0)
+  Saccade  3: desk   at ( -7.0,   2.0)
+  Saccade  3: desk   at ( -7.0,   0.0)
+  Saccade  3: desk   at ( -7.0,  -2.0)
+  Saccade  3: box    at ( -6.5,   1.0)

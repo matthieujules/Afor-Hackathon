@@ -57,6 +57,9 @@ LAMBDA_ENTROPY = 0.8    # weight on exploring the unknown
 LAMBDA_GLOW = 1.5       # weight on following the "lead" (continuity)
 SACCADE_COST = 0.05     # cost of rotating (degrees)
 
+# Exploration mode for benchmarking
+EXPLORATION_MODE = os.getenv('EXPLORATION_MODE', 'semantic')  # 'semantic' or 'systematic'
+
 # Vision model settings
 print("[INIT] Starting vision system...", flush=True)
 USE_REAL_VLM = os.getenv('USE_VLM', '0') == '1'
@@ -208,16 +211,15 @@ def create_topdown_view(robot_pos, robot_yaw, interest_map, seen_map, glow_map, 
     """
     Create top-down visualization of the robot's world understanding.
     Shows: robot position/orientation, FOV cone, glow predictions, actual objects
+    Objects that have been seen are highlighted in red.
     """
     fig, ax = plt.subplots(figsize=(8, 8), dpi=100)
 
-    # Simple visualization: Red = already looked, Green = glow predictions
+    # Visualization: Only show green glow predictions (no red zone overlay)
     glow_normalized = np.clip(glow_map, 0, 1)
-    seen_normalized = np.clip(seen_map, 0, 1)
 
-    # Create composite: Red = seen, Green = glow
+    # Create composite: Only green for glow predictions
     composite = np.zeros((GRID_SIZE, GRID_SIZE, 3))
-    composite[:, :, 0] = seen_normalized * 0.6  # Red = already looked (medium intensity)
     composite[:, :, 1] = glow_normalized * 2.5  # Green = glow predictions (BOOSTED)
 
     # Display composite
@@ -260,7 +262,7 @@ def create_topdown_view(robot_pos, robot_yaw, interest_map, seen_map, glow_map, 
     ax.set_ylim(-WORLD_SIZE/2, WORLD_SIZE/2)
     ax.set_xlabel('X (meters)', color='white', fontsize=10)
     ax.set_ylabel('Y (meters)', color='white', fontsize=10)
-    ax.set_title('Top-Down View\nRed=Already Looked | Green=Glow Predictions',
+    ax.set_title('Top-Down View\nRed=Seen Objects | Green=Glow Predictions',
                  color='white', fontsize=12, pad=10)
 
     # Dark background
@@ -275,14 +277,22 @@ def create_topdown_view(robot_pos, robot_yaw, interest_map, seen_map, glow_map, 
                         color='gray', alpha=0.5, edgecolor='white', linewidth=2))
 
     # Draw actual objects if provided
+    # Highlight seen objects in red
     if objects:
         for x, y, obj_type in objects:
+            # Check if this object has been seen
+            gy, gx = world_to_grid([x, y])
+            is_seen = seen_map[gy, gx] > 0.5
+
+            # Color: Red if seen, normal color if not seen
             if obj_type == 'desk':
+                color = 'red' if is_seen else 'brown'
                 ax.add_patch(plt.Rectangle((x-0.5, y-0.4), 1.0, 0.8,
-                            facecolor='brown', alpha=0.9, edgecolor='white', linewidth=0.5))
+                            facecolor=color, alpha=0.9, edgecolor='white', linewidth=0.5))
             elif obj_type == 'box':
+                color = 'red' if is_seen else 'darkgray'
                 ax.add_patch(plt.Circle((x, y), 0.25,
-                            facecolor='darkgray', alpha=0.9, edgecolor='white', linewidth=0.5))
+                            facecolor=color, alpha=0.9, edgecolor='white', linewidth=0.5))
 
     # Add compass
     ax.text(WORLD_SIZE/2 - 1, WORLD_SIZE/2 - 1, 'N', color='white', fontsize=14,
@@ -428,40 +438,72 @@ def calculate_view_utility(robot_pos, candidate_heading):
     total_score = score_entropy + score_glow
     return total_score, (score_entropy, score_glow)
 
-def choose_next_angle(robot_pos, current_heading):
-    """Scan 360 degrees and pick the best angle."""
+def choose_next_angle_semantic(robot_pos, current_heading):
+    """Scan 360 degrees and pick the best angle using semantic curiosity."""
     best_angle = None
     best_score = -1e9
     best_components = (0, 0)
 
     # Track all angles with the best score (for tie-breaking)
     best_angles = []
+    all_scores = []  # Debug
 
     candidates = np.linspace(0, 2*np.pi, 16, endpoint=False) # 16 directions
 
     for ang in candidates:
         score, components = calculate_view_utility(robot_pos, ang)
+        all_scores.append(score)
 
-        if score > best_score:
+        if score > best_score + 0.01:  # Use small epsilon to avoid float issues
             best_score = score
             best_angle = ang
             best_components = components
             best_angles = [ang]  # Reset tie list
-        elif score == best_score:
+        elif abs(score - best_score) <= 0.01:  # Treat as tie if within epsilon
             best_angles.append(ang)  # Track ties
+
+    # Debug: Check how many unique scores we have
+    unique_scores = len(set(np.round(all_scores, 1)))
+    if unique_scores == 1 and best_score < 0.1:
+        print(f"  [PLANNING] All angles have same low score ({best_score:.1f}) - everything explored!")
 
     # If multiple angles have the same score, pick randomly
     # This prevents getting stuck when everything is explored
     if len(best_angles) > 1:
         best_angle = np.random.choice(best_angles)
-        print(f"  [PLANNING] Tie-breaking: {len(best_angles)} angles with score {best_score:.1f}, chose {math.degrees(best_angle):.1f}°")
+        print(f"  [PLANNING] Tie-breaking: chose {math.degrees(best_angle):.1f}° from {len(best_angles)} tied angles")
 
     # If no valid angle found (shouldn't happen), pick random
     if best_angle is None:
         best_angle = np.random.choice(candidates)
-        print(f"  [PLANNING] No valid angles, random choice: {math.degrees(best_angle):.1f}°")
+        print(f"  [PLANNING] ERROR: No valid angles found! Random choice: {math.degrees(best_angle):.1f}°")
 
     return best_angle, best_score, best_components
+
+
+def choose_next_angle_systematic(robot_pos, current_heading):
+    """
+    Systematic scan: Simply rotate by fixed increment (22.5 degrees).
+    This is the baseline approach - exhaustive coverage without semantic guidance.
+    """
+    # 16 directions @ 22.5° each = 360°
+    angle_increment = 2 * np.pi / 16  # 22.5 degrees in radians
+
+    # Next angle is current + increment (wraps around at 2π)
+    next_angle = (current_heading + angle_increment) % (2 * np.pi)
+
+    # For consistency, still calculate utility (for logging), but ignore it
+    score, components = calculate_view_utility(robot_pos, next_angle)
+
+    return next_angle, score, components
+
+
+def choose_next_angle(robot_pos, current_heading):
+    """Choose next angle based on exploration mode."""
+    if EXPLORATION_MODE == 'systematic':
+        return choose_next_angle_systematic(robot_pos, current_heading)
+    else:
+        return choose_next_angle_semantic(robot_pos, current_heading)
 
 # ============================================================================
 # PYBULLET ENV
