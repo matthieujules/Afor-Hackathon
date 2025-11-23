@@ -92,10 +92,11 @@ seen_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 glow_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
 # Robot State
-current_yaw = 0.0 # radians
+current_yaw = np.pi / 2  # radians - Start facing NORTH (up)
 
 # Object tracking for visualization
 object_positions = []  # List of (x, y, type) tuples
+wall_positions = []  # List of wall positions for visualization
 
 # ============================================================================
 # WEBSOCKET CLIENT
@@ -203,23 +204,21 @@ def numpy_to_base64_png(img_array):
     img_base64 = base64.b64encode(buf.read()).decode('utf-8')
     return img_base64
 
-def create_topdown_view(robot_pos, robot_yaw, interest_map, seen_map, glow_map):
+def create_topdown_view(robot_pos, robot_yaw, interest_map, seen_map, glow_map, objects=None, walls=None):
     """
     Create top-down visualization of the robot's world understanding.
-    Shows: robot position/orientation, FOV cone, interestingness heatmap
+    Shows: robot position/orientation, FOV cone, glow predictions, actual objects
     """
     fig, ax = plt.subplots(figsize=(8, 8), dpi=100)
 
-    # Create composite visualization: interest map with glow overlay
-    # Normalize maps for visualization
-    interest_normalized = np.clip(interest_map, 0, 1)
+    # Simple visualization: Red = already looked, Green = glow predictions
     glow_normalized = np.clip(glow_map, 0, 1)
+    seen_normalized = np.clip(seen_map, 0, 1)
 
-    # Create RGB composite: interest (red channel), glow (green channel), seen (blue channel)
+    # Create composite: Red = seen, Green = glow
     composite = np.zeros((GRID_SIZE, GRID_SIZE, 3))
-    composite[:, :, 0] = interest_normalized  # Red = interest
-    composite[:, :, 1] = glow_normalized * 2.0  # Green = glow (BOOSTED for visibility)
-    composite[:, :, 2] = seen_map * 0.3  # Blue = coverage (subtle)
+    composite[:, :, 0] = seen_normalized * 0.6  # Red = already looked (medium intensity)
+    composite[:, :, 1] = glow_normalized * 2.5  # Green = glow predictions (BOOSTED)
 
     # Display composite
     ax.imshow(composite, origin='lower', extent=[-WORLD_SIZE/2, WORLD_SIZE/2, -WORLD_SIZE/2, WORLD_SIZE/2])
@@ -261,13 +260,29 @@ def create_topdown_view(robot_pos, robot_yaw, interest_map, seen_map, glow_map):
     ax.set_ylim(-WORLD_SIZE/2, WORLD_SIZE/2)
     ax.set_xlabel('X (meters)', color='white', fontsize=10)
     ax.set_ylabel('Y (meters)', color='white', fontsize=10)
-    ax.set_title('Top-Down View\nRed=Interest | Green=Glow | Blue=Seen',
+    ax.set_title('Top-Down View\nRed=Already Looked | Green=Glow Predictions',
                  color='white', fontsize=12, pad=10)
 
     # Dark background
     ax.set_facecolor('#1a1a1a')
     fig.patch.set_facecolor('#1a1a1a')
     ax.tick_params(colors='white', labelsize=8)
+
+    # Draw walls if provided
+    if walls:
+        for x, y, w, h in walls:
+            ax.add_patch(plt.Rectangle((x, y), w, h,
+                        color='gray', alpha=0.5, edgecolor='white', linewidth=2))
+
+    # Draw actual objects if provided
+    if objects:
+        for x, y, obj_type in objects:
+            if obj_type == 'desk':
+                ax.add_patch(plt.Rectangle((x-0.5, y-0.4), 1.0, 0.8,
+                            facecolor='brown', alpha=0.9, edgecolor='white', linewidth=0.5))
+            elif obj_type == 'box':
+                ax.add_patch(plt.Circle((x, y), 0.25,
+                            facecolor='darkgray', alpha=0.9, edgecolor='white', linewidth=0.5))
 
     # Add compass
     ax.text(WORLD_SIZE/2 - 1, WORLD_SIZE/2 - 1, 'N', color='white', fontsize=14,
@@ -415,9 +430,12 @@ def calculate_view_utility(robot_pos, candidate_heading):
 
 def choose_next_angle(robot_pos, current_heading):
     """Scan 360 degrees and pick the best angle."""
-    best_angle = current_heading
+    best_angle = None
     best_score = -1e9
     best_components = (0, 0)
+
+    # Track all angles with the best score (for tie-breaking)
+    best_angles = []
 
     candidates = np.linspace(0, 2*np.pi, 16, endpoint=False) # 16 directions
 
@@ -428,6 +446,20 @@ def choose_next_angle(robot_pos, current_heading):
             best_score = score
             best_angle = ang
             best_components = components
+            best_angles = [ang]  # Reset tie list
+        elif score == best_score:
+            best_angles.append(ang)  # Track ties
+
+    # If multiple angles have the same score, pick randomly
+    # This prevents getting stuck when everything is explored
+    if len(best_angles) > 1:
+        best_angle = np.random.choice(best_angles)
+        print(f"  [PLANNING] Tie-breaking: {len(best_angles)} angles with score {best_score:.1f}, chose {math.degrees(best_angle):.1f}°")
+
+    # If no valid angle found (shouldn't happen), pick random
+    if best_angle is None:
+        best_angle = np.random.choice(candidates)
+        print(f"  [PLANNING] No valid angles, random choice: {math.degrees(best_angle):.1f}°")
 
     return best_angle, best_score, best_components
 
@@ -475,6 +507,10 @@ def load_stl_mesh(stl_path, position=[0, 0, 0], orientation=[0, 0, 0, 1], scale=
     return body_id
 
 def setup_env():
+    global object_positions, wall_positions
+    object_positions = []  # Reset
+    wall_positions = []  # Reset
+
     print("[SETUP] Connecting to PyBullet GUI...")
     p.connect(p.GUI)
     print("[SETUP] PyBullet connected")
@@ -490,84 +526,76 @@ def setup_env():
     p.loadURDF("plane.urdf")
     print("[SETUP] Ground plane loaded")
 
-    # Walls - REMOVED per user request for simplification
-    # p.loadURDF("cube.urdf", [10, 0, 5], globalScaling=10)  # East wall
-    # p.loadURDF("cube.urdf", [-10, 0, 5], globalScaling=10)  # West wall
-    # p.loadURDF("cube.urdf", [0, 10, 5], globalScaling=10)  # North wall
-    # p.loadURDF("cube.urdf", [0, -10, 5], globalScaling=10)  # South wall
-    print("[SETUP] Walls removed (Open world)")
+    # === WALLS - 4 walls forming a room ===
+    wall_height = 3.0
+    wall_z = wall_height / 2
+    print("[SETUP] Building walls...")
 
-    # === MANUAL SCENE LAYOUT ===
-    print("[SETUP] Spawning scene - Desks and black boxes only...")
+    # North wall (agent looks at this initially)
+    p.loadURDF("cube.urdf", [0, 8, wall_z], globalScaling=16, useFixedBase=True)
+    wall_positions.append((-8, 8, 16, 0.5))  # (x, y, width, height) for visualization
 
-    # 1. East Zone - Dense desk cluster with box trail
-    p.loadURDF("table/table.urdf", [5, 0, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [6.5, 0.5, 0], p.getQuaternionFromEuler([0, 0, 0.5]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [5.2, -1.5, 0], p.getQuaternionFromEuler([0, 0, -0.3]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [7, -1, 0], p.getQuaternionFromEuler([0, 0, 1.2]), useFixedBase=True)
-    # Black boxes on desks
-    p.loadURDF("cube.urdf", [5, 0, 0.7], globalScaling=0.5, useFixedBase=True)
-    p.loadURDF("cube.urdf", [6.5, 0.5, 0.7], globalScaling=0.6, useFixedBase=True)
-    p.loadURDF("cube.urdf", [5.2, -1.5, 0.7], globalScaling=0.5, useFixedBase=True)
-    print("  East Zone")
+    # East wall (right side - visible from start)
+    p.loadURDF("cube.urdf", [8, 0, wall_z], globalScaling=16, useFixedBase=True)
+    wall_positions.append((8, -8, 0.5, 16))
 
-    # 2. North Zone - Desk rows
-    p.loadURDF("table/table.urdf", [0, 6, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [2, 6.5, 0], p.getQuaternionFromEuler([0, 0, 0.2]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [-2, 6.2, 0], p.getQuaternionFromEuler([0, 0, -0.2]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [1, 4.5, 0], p.getQuaternionFromEuler([0, 0, 0.8]), useFixedBase=True)
-    # Black boxes
-    p.loadURDF("cube.urdf", [0, 6, 0.7], globalScaling=0.5, useFixedBase=True)
-    p.loadURDF("cube.urdf", [2, 6.5, 0.7], globalScaling=0.5, useFixedBase=True)
-    p.loadURDF("cube.urdf", [-2, 6.2, 0.7], globalScaling=0.6, useFixedBase=True)
-    print("  North Zone")
+    # South wall (behind agent initially)
+    p.loadURDF("cube.urdf", [0, -8, wall_z], globalScaling=16, useFixedBase=True)
+    wall_positions.append((-8, -8, 16, 0.5))
 
-    # 3. West Zone - Scattered desks
-    p.loadURDF("table/table.urdf", [-5, 0, 0], p.getQuaternionFromEuler([0, 0, 1.5]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [-6.5, 1.5, 0], p.getQuaternionFromEuler([0, 0, 0.5]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [-5.5, -1.5, 0], p.getQuaternionFromEuler([0, 0, -0.8]), useFixedBase=True)
-    # Black boxes
-    p.loadURDF("cube.urdf", [-5, 0, 0.7], globalScaling=0.5, useFixedBase=True)
-    p.loadURDF("cube.urdf", [-6.5, 1.5, 0.7], globalScaling=0.6, useFixedBase=True)
-    p.loadURDF("cube.urdf", [-5.5, -1.5, 0.7], globalScaling=0.5, useFixedBase=True)
-    print("  West Zone")
+    # West wall (left side - NOT visible from start)
+    p.loadURDF("cube.urdf", [-8, 0, wall_z], globalScaling=16, useFixedBase=True)
+    wall_positions.append((-8, -8, 0.5, 16))
 
-    # 4. South Zone
-    p.loadURDF("table/table.urdf", [0, -5.5, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [2, -6, 0], p.getQuaternionFromEuler([0, 0, 0.7]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [-2, -5.8, 0], p.getQuaternionFromEuler([0, 0, -0.5]), useFixedBase=True)
-    # Black boxes
-    p.loadURDF("cube.urdf", [0, -5.5, 0.7], globalScaling=0.5, useFixedBase=True)
-    p.loadURDF("cube.urdf", [2, -6, 0.7], globalScaling=0.6, useFixedBase=True)
-    print("  South Zone")
+    print("  4 walls created")
 
-    # 5. Central Zone - CRITICAL: Box trail for visual continuity testing
-    p.loadURDF("table/table.urdf", [2, 1.5, 0], p.getQuaternionFromEuler([0, 0, 0.3]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [-1.5, 1.5, 0], p.getQuaternionFromEuler([0, 0, 1.8]), useFixedBase=True)
-    p.loadURDF("table/table.urdf", [0.5, -2, 0], p.getQuaternionFromEuler([0, 0, -1.2]), useFixedBase=True)
-    # TRAIL OF BOXES: This should trigger "right" lead_direction when looking from center
-    p.loadURDF("cube.urdf", [1, 0, 0.5], globalScaling=0.7, useFixedBase=True)
-    p.loadURDF("cube.urdf", [2.5, 0.2, 0.5], globalScaling=0.7, useFixedBase=True)
-    p.loadURDF("cube.urdf", [3.8, 0.1, 0.5], globalScaling=0.7, useFixedBase=True)
-    p.loadURDF("cube.urdf", [5.2, 0.3, 0.5], globalScaling=0.7, useFixedBase=True)
-    # More boxes on desks
-    p.loadURDF("cube.urdf", [2, 1.5, 0.7], globalScaling=0.5, useFixedBase=True)
-    p.loadURDF("cube.urdf", [-1.5, 1.5, 0.7], globalScaling=0.5, useFixedBase=True)
-    print("  Central Zone - Box trail for glow testing")
+    # === SCENE LAYOUT ===
+    print("[SETUP] Spawning objects...")
 
-    # 6. Additional standalone boxes
-    p.loadURDF("cube.urdf", [-3, 3, 0.5], globalScaling=0.8, useFixedBase=True)
-    p.loadURDF("cube.urdf", [3.5, -3, 0.5], globalScaling=0.7, useFixedBase=True)
-    p.loadURDF("cube.urdf", [-4, -2, 0.5], globalScaling=0.6, useFixedBase=True)
-    print("  Additional boxes")
+    # TABLE AT NORTH WALL - directly in front, agent sees it immediately
+    p.loadURDF("table/table.urdf", [0, 7, 0], p.getQuaternionFromEuler([0, 0, np.pi/2]), useFixedBase=True)
+    object_positions.append((0, 7, 'desk'))
+    print("  North: Table at wall (visible from start)")
 
-    # === EMPTY ZONE ===
-    print("  Empty zone: South-East corner")
+    # WEST WALL CLUSTER - NOT visible initially, agent must turn left to see
+    west_objects = [
+        [-7, 2, 0], [-7, 0, 0.3], [-7, -2, -0.2],
+        [-6.5, 1, 0.5], [-6.5, -1, -0.4],
+        [-6, 0.5, 0.2]
+    ]
+    for pos in west_objects:
+        p.loadURDF("table/table.urdf", pos, p.getQuaternionFromEuler([0, 0, pos[2]]), useFixedBase=True)
+        object_positions.append((pos[0], pos[1], 'desk'))
+        # Boxes on desks
+        p.loadURDF("cube.urdf", [pos[0], pos[1], 0.7], globalScaling=0.4, useFixedBase=True)
+        object_positions.append((pos[0], pos[1], 'box'))
+    print("  West wall: Dense cluster (not visible initially)")
 
-    # === ROBOT (REMOVED) ===
-    # We are now just a disembodied camera at the origin.
+    # SOUTH WALL CLUSTER - Behind agent, must turn around
+    south_objects = [
+        [2, -7, 0], [0, -7, 0.4], [-2, -7, -0.3],
+        [1, -6.5, 0.6], [-1, -6.5, -0.2]
+    ]
+    for pos in south_objects:
+        p.loadURDF("table/table.urdf", pos, p.getQuaternionFromEuler([0, 0, pos[2]]), useFixedBase=True)
+        object_positions.append((pos[0], pos[1], 'desk'))
+        # Boxes on desks
+        p.loadURDF("cube.urdf", [pos[0], pos[1], 0.7], globalScaling=0.4, useFixedBase=True)
+        object_positions.append((pos[0], pos[1], 'box'))
+    print("  South wall: Cluster (behind agent)")
+
+    # Sparse boxes in center
+    center_boxes = [[2, 2, 0.5], [-1, 1, 0.5], [1, -1, 0.5]]
+    for pos in center_boxes:
+        p.loadURDF("cube.urdf", pos, globalScaling=0.5, useFixedBase=True)
+        object_positions.append((pos[0], pos[1], 'box'))
+
+    print(f"  Total objects: {len(object_positions)}")
+    print("  Agent facing NORTH - sees north wall + table, can see NE corner")
+    print("  West wall cluster NOT visible - must turn left")
+    print("  South wall cluster NOT visible - must turn around")
+
     print("[SETUP] Robot body removed. Using pure camera.")
-
     return None
 
 def get_camera_image(robot_id, yaw):
@@ -698,8 +726,12 @@ def main():
                     'glow_score': s_glow
                 }
 
-                # Generate top-down view
-                topdown_view = create_topdown_view([0, 0], current_yaw, interest_map, seen_map, glow_map)
+                # Save glow map to CSV for debugging
+                np.savetxt('/tmp/glow_map.csv', glow_map, delimiter=',', fmt='%.4f')
+                print(f"  Glow map saved to /tmp/glow_map.csv (nonzero cells: {np.count_nonzero(glow_map)})")
+
+                # Generate top-down view with object and wall positions
+                topdown_view = create_topdown_view([0, 0], current_yaw, interest_map, seen_map, glow_map, object_positions, wall_positions)
 
                 # Send complete update with visualizations
                 dashboard_data = {
