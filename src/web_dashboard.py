@@ -59,6 +59,34 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# Global restart flag
+restart_requested = False
+
+# Data posting endpoint for benchmark
+@app.post("/api/benchmark")
+async def post_benchmark_data(request: dict):
+    """Receive benchmark data and broadcast to all connected clients"""
+    await manager.broadcast(request)
+    return {"status": "ok"}
+
+# Restart endpoint
+@app.post("/api/restart")
+async def restart_benchmark():
+    """Signal benchmark to restart"""
+    global restart_requested
+    restart_requested = True
+    logger.info("Benchmark restart requested")
+    return {"status": "restart_requested"}
+
+@app.get("/api/restart-status")
+async def get_restart_status():
+    """Check if restart was requested and clear flag"""
+    global restart_requested
+    status = restart_requested
+    if restart_requested:
+        restart_requested = False
+    return {"restart_requested": status}
+
 # Serve static files (HTML, CSS, JS)
 static_path = Path(__file__).parent.parent / "static"
 static_path.mkdir(exist_ok=True)
@@ -66,18 +94,18 @@ app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
 @app.get("/")
 async def get_dashboard():
-    """Serve the main dashboard HTML"""
-    html_path = static_path / "dashboard.html"
+    """Serve the benchmark dashboard HTML"""
+    html_path = static_path / "benchmark.html"
     if html_path.exists():
         return HTMLResponse(content=html_path.read_text())
     else:
         return HTMLResponse(
             content="""
             <html>
-                <head><title>Semantix Dashboard</title></head>
+                <head><title>Semantix Benchmark</title></head>
                 <body>
-                    <h1>Dashboard Not Found</h1>
-                    <p>Please ensure static/dashboard.html exists.</p>
+                    <h1>Benchmark Dashboard Not Found</h1>
+                    <p>Please ensure static/benchmark.html exists.</p>
                 </body>
             </html>
             """,

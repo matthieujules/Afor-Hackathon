@@ -24,3 +24,265 @@ Using cache found in /Users/matthieuhuss/.cache/torch/hub/facebookresearch_dinov
   ax.add_patch(Rectangle((x, y), w, h,
 /Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
   ax.add_patch(Rectangle((x, y), w, h,
+/Users/matthieuhuss/Vision_Test/src/benchmark_runner.py:132: UserWarning: Setting the 'color' property will override the edgecolor or facecolor properties.
+  ax.add_patch(Rectangle((x, y), w, h,
+
+============================================================
+SEMANTIX EXPLORATION BENCHMARK
+============================================================
+
+[SETUP] Connecting to PyBullet...
+[SETUP] Creating 3 scattered object clusters...
+  Cluster 1 (NORTHWEST): 6 objects TIGHTLY PACKED at 120°-150°
+    → Semantic agent sees edge → glow LEFT → locks onto entire cluster
+    Object 1: (-3.0,  5.2) @ 120.0°, dist=6.00m
+    Object 2: (-3.5,  5.0) @ 125.0°, dist=6.10m
+    Object 3: (-4.0,  4.8) @ 129.8°, dist=6.25m
+    Object 4: (-4.5,  4.5) @ 135.0°, dist=6.36m
+    Object 5: (-4.8,  4.0) @ 140.2°, dist=6.25m
+    Object 6: (-5.0,  3.5) @ 145.0°, dist=6.10m
+  [EMPTY ZONE: 150°-210° - forces systematic to waste saccades]
+  Cluster 2 (SOUTHWEST): 5 objects TIGHTLY PACKED at 210°-240°
+    → Isolated cluster, semantic must explore to find
+    Object 7: (-4.0, -4.5) @ -131.6°, dist=6.02m
+    Object 8: (-4.5, -4.0) @ -138.4°, dist=6.02m
+    Object 9: (-5.0, -3.5) @ -145.0°, dist=6.10m
+    Object 10: (-5.2, -3.0) @ -150.0°, dist=6.00m
+    Object 11: (-4.8, -4.8) @ -135.0°, dist=6.79m
+  [EMPTY ZONE: 240°-300° - more wasted systematic saccades]
+  Cluster 3 (SOUTHEAST): 4 objects TIGHTLY PACKED at 300°-330°
+    → Opposite from start, semantic must hunt for it
+    Object 12: ( 3.5, -5.0) @ -55.0°, dist=6.10m
+    Object 13: ( 4.0, -4.5) @ -48.4°, dist=6.02m
+    Object 14: ( 4.5, -4.0) @ -41.6°, dist=6.02m
+    Object 15: ( 4.8, -3.5) @ -36.1°, dist=5.94m
+
+[SETUP] Environment ready: 15 objects in 3 DENSE clusters
+         - Cluster 1 (NW):  6 objects PACKED at 120°-150° (edge visible)
+         - EMPTY ZONE:      150°-210° (NO OBJECTS)
+         - Cluster 2 (SW):  5 objects PACKED at 210°-240°
+         - EMPTY ZONE:      240°-300° (NO OBJECTS)
+         - Cluster 3 (SE):  4 objects PACKED at 300°-330°
+
+[SETUP] Expected behavior:
+         ✓ Semantic: Sees Cluster 1 edge → glow LEFT → locks onto cluster → discovers 6 quickly
+                     Then hunts for remaining clusters → faster discovery
+         ✗ Systematic: Rotates 22.5° each step → wastes time scanning empty zones
+                       Discovers objects only when rotation happens to hit clusters
+
+[INIT] Loading vision model...
+Loading DINOv2 model (this may take a moment)...
+  Device: mps
+  Loading: DINOv2 ViT-S/14 (torch.hub)
+  Status: DINOv2 ViT-S/14 ready on mps
+  Features: 384-dim embeddings, 16x16 patch grid
+[INIT] Vision model ready
+
+[INIT] Both agents starting at position [0, 0] facing 90.0° (North)
+[INIT] FOV = 60° → agents see from 60.0° to 120.0°
+[INIT] Agents initialized successfully
+       Systematic: yaw=90.0°
+       Semantic:   yaw=90.0°
+
+[VIZ] Starting visualizer...
+[VIZ] Visualizer ready
+
+============================================================
+STARTING EXPLORATION
+Running until both agents discover all 15 objects...
+(max limit: 50 saccades as safety)
+============================================================
+
+
+============================================================
+SACCADE #1 - T=0s
+  Systematic: 0/15 objects | Semantic: 0/15 objects
+  Current yaw: Systematic=90.0° | Semantic=90.0°
+============================================================
+[INIT-CHECK] First frame - both agents should see identical views
+             Systematic camera: yaw=90.0°
+             Semantic camera:   yaw=90.0°
+             Initial images match: True
+    [DINOv2] Raw variance: 3.336543
+    [LEAD] RIGHT detected: left=47.63, right=49.65, center=50.71
+  [SYSTEMATIC ] ✓ DISCOVERED 1: #1@(-3.0,5.2)
+  [SYSTEMATIC ] Yaw:   90.0° →  112.5°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: right  | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 102.4 | Glow Score: 0.0
+    [DINOv2] Raw variance: 3.336543
+    [LEAD] RIGHT detected: left=47.63, right=49.65, center=50.71
+  [SEMANTIC   ] ✓ DISCOVERED 1: #1@(-3.0,5.2)
+  [SEMANTIC   ] Yaw:   90.0° →   22.5°
+  [SEMANTIC   ]   Interest: 1.00 | Lead: right  | Decision: Exploration (Entropy)
+  [SEMANTIC   ]   Glow: 144 cells active (max=0.88) | Entropy: 292.8 | Glow Score: 93.3
+
+============================================================
+SACCADE #2 - T=10s
+  Systematic: 1/15 objects | Semantic: 1/15 objects
+  Current yaw: Systematic=112.5° | Semantic=22.5°
+============================================================
+    [DINOv2] Raw variance: 3.761966
+    [LEAD] RIGHT detected: left=48.51, right=50.74, center=51.11
+  [SYSTEMATIC ] ✓ DISCOVERED 5: #2@(-3.5,5.0), #3@(-4.0,4.8), #4@(-4.5,4.5), #5@(-4.8,4.0), #6@(-5.0,3.5)
+  [SYSTEMATIC ] Yaw:  112.5° →  135.0°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: right  | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 104.8 | Glow Score: 0.0
+    [DINOv2] Raw variance: 3.475154
+    [LEAD] RIGHT detected: left=49.68, right=50.45, center=51.75
+  [SEMANTIC   ] Yaw:   22.5° →  315.0°
+  [SEMANTIC   ]   Interest: 1.00 | Lead: right  | Decision: Exploration (Entropy)
+  [SEMANTIC   ]   Glow: 292 cells active (max=0.88) | Entropy: 294.4 | Glow Score: 96.0
+
+============================================================
+SACCADE #3 - T=20s
+  Systematic: 6/15 objects | Semantic: 1/15 objects
+  Current yaw: Systematic=135.0° | Semantic=315.0°
+============================================================
+    [DINOv2] Raw variance: 3.880498
+    [LEAD] CENTER (balanced): left=51.29, right=51.58, center=50.99
+  [SYSTEMATIC ] Yaw:  135.0° →  157.5°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: center | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 104.0 | Glow Score: 0.0
+    [DINOv2] Raw variance: 3.702822
+    [LEAD] RIGHT detected: left=50.87, right=51.74, center=50.55
+  [SEMANTIC   ] ✓ DISCOVERED 4: #12@(3.5,-5.0), #13@(4.0,-4.5), #14@(4.5,-4.0), #15@(4.8,-3.5)
+  [SEMANTIC   ] Yaw:  315.0° →  247.5°
+  [SEMANTIC   ]   Interest: 1.00 | Lead: right  | Decision: Exploration (Entropy)
+  [SEMANTIC   ]   Glow: 379 cells active (max=0.88) | Entropy: 293.6 | Glow Score: 95.9
+
+============================================================
+SACCADE #4 - T=30s
+  Systematic: 6/15 objects | Semantic: 5/15 objects
+  Current yaw: Systematic=157.5° | Semantic=247.5°
+============================================================
+    [DINOv2] Raw variance: 3.738677
+    [LEAD] LEFT detected: left=50.64, right=48.96, center=51.35
+  [SYSTEMATIC ] Yaw:  157.5° →  180.0°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: left   | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 104.0 | Glow Score: 0.0
+    [DINOv2] Raw variance: 3.676425
+    [LEAD] LEFT detected: left=50.76, right=48.97, center=51.47
+  [SEMANTIC   ] ✓ DISCOVERED 4: #7@(-4.0,-4.5), #8@(-4.5,-4.0), #9@(-5.0,-3.5), #11@(-4.8,-4.8)
+  [SEMANTIC   ] Yaw:  247.5° →  180.0°
+  [SEMANTIC   ]   Interest: 1.00 | Lead: left   | Decision: Exploration (Entropy)
+  [SEMANTIC   ]   Glow: 238 cells active (max=0.52) | Entropy: 293.6 | Glow Score: 0.0
+
+============================================================
+SACCADE #5 - T=40s
+  Systematic: 6/15 objects | Semantic: 9/15 objects
+  Current yaw: Systematic=180.0° | Semantic=180.0°
+============================================================
+    [DINOv2] Raw variance: 3.371400
+    [LEAD] RIGHT detected: left=46.16, right=49.37, center=51.16
+  [SYSTEMATIC ] ✓ DISCOVERED 1: #10@(-5.2,-3.0)
+  [SYSTEMATIC ] Yaw:  180.0° →  202.5°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: right  | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 102.4 | Glow Score: 0.0
+    [DINOv2] Raw variance: 3.371400
+    [LEAD] RIGHT detected: left=46.16, right=49.37, center=51.16
+  [SEMANTIC   ] ✓ DISCOVERED 1: #10@(-5.2,-3.0)
+  [SEMANTIC   ] Yaw:  180.0° →  135.0°
+  [SEMANTIC   ]   Interest: 1.00 | Lead: right  | Decision: Exploration (Entropy)
+  [SEMANTIC   ]   Glow: 185 cells active (max=0.88) | Entropy: 115.2 | Glow Score: 57.7
+
+============================================================
+SACCADE #6 - T=50s
+  Systematic: 7/15 objects | Semantic: 10/15 objects
+  Current yaw: Systematic=202.5° | Semantic=135.0°
+============================================================
+    [DINOv2] Raw variance: 3.721255
+    [LEAD] RIGHT detected: left=48.90, right=50.70, center=51.06
+  [SYSTEMATIC ] ✓ DISCOVERED 4: #7@(-4.0,-4.5), #8@(-4.5,-4.0), #9@(-5.0,-3.5), #11@(-4.8,-4.8)
+  [SYSTEMATIC ] Yaw:  202.5° →  225.0°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: right  | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 104.8 | Glow Score: 0.0
+    [DINOv2] Raw variance: 3.880498
+    [LEAD] CENTER (balanced): left=51.29, right=51.58, center=50.99
+  [SEMANTIC   ] ✓ DISCOVERED 5: #2@(-3.5,5.0), #3@(-4.0,4.8), #4@(-4.5,4.5), #5@(-4.8,4.0), #6@(-5.0,3.5)
+  [SEMANTIC   ] Yaw:  135.0° →  135.0°
+  [SEMANTIC   ]   Interest: 1.00 | Lead: center | Decision: Curiosity (Glow)
+  [SEMANTIC   ]   Glow: 98 cells active (max=0.44) | Entropy: 0.0 | Glow Score: 28.8
+
+🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀
+  SEMANTIC COMPLETE!
+  Time: 53.8s | Saccades: 6
+🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀
+
+
+============================================================
+SACCADE #7 - T=60s
+  Systematic: 11/15 objects | Semantic: 15/15 objects
+  Current yaw: Systematic=225.0° | Semantic=135.0°
+============================================================
+    [DINOv2] Raw variance: 3.753270
+    [LEAD] CENTER (balanced): left=50.86, right=51.36, center=50.68
+  [SYSTEMATIC ] Yaw:  225.0° →  247.5°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: center | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 104.0 | Glow Score: 0.0
+
+============================================================
+SACCADE #8 - T=70s
+  Systematic: 11/15 objects | Semantic: 15/15 objects
+  Current yaw: Systematic=247.5° | Semantic=135.0°
+============================================================
+    [DINOv2] Raw variance: 3.676425
+    [LEAD] LEFT detected: left=50.76, right=48.97, center=51.47
+  [SYSTEMATIC ] Yaw:  247.5° →  270.0°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: left   | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 104.0 | Glow Score: 0.0
+
+============================================================
+SACCADE #9 - T=80s
+  Systematic: 11/15 objects | Semantic: 15/15 objects
+  Current yaw: Systematic=270.0° | Semantic=135.0°
+============================================================
+    [DINOv2] Raw variance: 3.378550
+    [LEAD] RIGHT detected: left=47.71, right=50.31, center=51.37
+  [SYSTEMATIC ] Yaw:  270.0° →  292.5°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: right  | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 102.4 | Glow Score: 0.0
+
+============================================================
+SACCADE #10 - T=90s
+  Systematic: 11/15 objects | Semantic: 15/15 objects
+  Current yaw: Systematic=292.5° | Semantic=135.0°
+============================================================
+    [DINOv2] Raw variance: 3.727284
+    [LEAD] RIGHT detected: left=49.18, right=50.94, center=51.40
+  [SYSTEMATIC ] ✓ DISCOVERED 4: #12@(3.5,-5.0), #13@(4.0,-4.5), #14@(4.5,-4.0), #15@(4.8,-3.5)
+  [SYSTEMATIC ] Yaw:  292.5° →  315.0°
+  [SYSTEMATIC ]   Interest: 1.00 | Lead: right  | Decision: Systematic Rotation
+  [SYSTEMATIC ]   Glow: 0 cells active (max=0.00) | Entropy: 104.8 | Glow Score: 0.0
+
+🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯
+  SYSTEMATIC COMPLETE!
+  Time: 95.0s | Saccades: 10
+🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯🎯
+
+
+[COMPLETE] Both agents found all 15 objects!
+
+============================================================
+FINAL RESULTS
+============================================================
+
+SYSTEMATIC SCAN:
+  Saccades: 10
+  Objects: 15/15 (100.0%)
+  Time to 100%: 95.0s
+
+SEMANTIC CURIOSITY:
+  Saccades: 6
+  Objects: 15/15 (100.0%)
+  Time to 100%: 53.8s
+
+IMPROVEMENT:
+  Saccades: +40.0% (4 fewer)
+  Time: +43.4% (41.2s faster)
+
+
+[BENCHMARK] Results saved to benchmark_results.txt
+
+[VIZ] Keeping visualization open for 5 seconds...
+
+[BENCHMARK] Complete!

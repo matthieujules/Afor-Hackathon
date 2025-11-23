@@ -8,14 +8,14 @@ in parallel, showing real-time visual comparison of discovery efficiency.
 
 import numpy as np
 import matplotlib
-matplotlib.use('TkAgg')  # Interactive backend
+matplotlib.use('Agg')  # Non-interactive backend for web
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Wedge, Rectangle
 import time
 import math
 from typing import Dict, Tuple, List
-import multiprocessing as mp
-from queue import Empty
+import base64
+from io import BytesIO
 
 from discovery_tracker import DiscoveryTracker
 
@@ -23,24 +23,29 @@ from discovery_tracker import DiscoveryTracker
 class BenchmarkVisualizer:
     """Real-time side-by-side visualization of two exploration strategies"""
 
-    def __init__(self, object_positions, walls, grid_size=64, world_size=20.0):
+    def __init__(self, object_positions, walls, grid_size=64, world_size=20.0, fov_degrees=25):
         self.object_positions = object_positions
         self.walls = walls
         self.grid_size = grid_size
         self.world_size = world_size
+        self.fov_degrees = fov_degrees
 
-        # Create figure with 2 columns (systematic | semantic) and 3 rows
-        self.fig = plt.figure(figsize=(16, 12))
+        # Create figure with 2 columns (systematic | semantic) and 4 rows
+        self.fig = plt.figure(figsize=(18, 14))
 
-        # Top row: Top-down views
-        self.ax_systematic_map = plt.subplot(2, 3, 1)
-        self.ax_semantic_map = plt.subplot(2, 3, 2)
-        self.ax_metrics = plt.subplot(2, 3, 3)
+        # Row 1: Top-down views + metrics
+        self.ax_systematic_map = plt.subplot(3, 3, 1)
+        self.ax_semantic_map = plt.subplot(3, 3, 2)
+        self.ax_metrics = plt.subplot(3, 3, 3)
 
-        # Bottom row: Camera views
-        self.ax_systematic_cam = plt.subplot(2, 3, 4)
-        self.ax_semantic_cam = plt.subplot(2, 3, 5)
-        self.ax_comparison = plt.subplot(2, 3, 6)
+        # Row 2: Camera views + stats
+        self.ax_systematic_cam = plt.subplot(3, 3, 4)
+        self.ax_semantic_cam = plt.subplot(3, 3, 5)
+        self.ax_comparison = plt.subplot(3, 3, 6)
+
+        # Row 3: Attention map (semantic only) and glow map
+        self.ax_attention = plt.subplot(3, 3, 8)  # Under semantic camera
+        self.ax_glow_detail = plt.subplot(3, 3, 7)  # Under systematic camera
 
         # Style
         for ax in [self.ax_systematic_map, self.ax_semantic_map,
@@ -48,8 +53,6 @@ class BenchmarkVisualizer:
             ax.set_facecolor('#1a1a1a')
 
         self.fig.patch.set_facecolor('#0a0a0a')
-        plt.ion()  # Interactive mode
-        plt.show()
 
         # Data storage for metrics plotting
         self.systematic_history = {'saccades': [], 'coverage': []}
@@ -72,11 +75,22 @@ class BenchmarkVisualizer:
             semantic_data: Same structure as systematic_data
         """
 
-        # Clear axes
+        # Recreate figure
+        self.fig = plt.figure(figsize=(18, 14))
+        self.ax_systematic_map = plt.subplot(3, 3, 1)
+        self.ax_semantic_map = plt.subplot(3, 3, 2)
+        self.ax_metrics = plt.subplot(3, 3, 3)
+        self.ax_systematic_cam = plt.subplot(3, 3, 4)
+        self.ax_semantic_cam = plt.subplot(3, 3, 5)
+        self.ax_comparison = plt.subplot(3, 3, 6)
+        self.ax_glow_detail = plt.subplot(3, 3, 7)
+        self.ax_attention = plt.subplot(3, 3, 8)
+
         for ax in [self.ax_systematic_map, self.ax_semantic_map,
-                   self.ax_systematic_cam, self.ax_semantic_cam,
-                   self.ax_metrics, self.ax_comparison]:
-            ax.clear()
+                   self.ax_systematic_cam, self.ax_semantic_cam]:
+            ax.set_facecolor('#1a1a1a')
+
+        self.fig.patch.set_facecolor('#0a0a0a')
 
         # 1. Draw top-down maps
         self._draw_topdown_map(self.ax_systematic_map, systematic_data, "SYSTEMATIC SCAN")
@@ -92,8 +106,22 @@ class BenchmarkVisualizer:
         # 4. Draw current stats comparison
         self._draw_stats_panel(systematic_data, semantic_data)
 
+        # 5. Draw glow map detail
+        self._draw_glow_detail(self.ax_glow_detail, semantic_data)
+
+        # 6. Draw attention map (semantic only)
+        self._draw_attention_map(self.ax_attention, semantic_data)
+
         plt.tight_layout()
-        plt.pause(0.01)
+
+        # Instead of showing, render to base64 image
+        buf = BytesIO()
+        plt.savefig(buf, format='png', facecolor='#0a0a0a', dpi=100)
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close(self.fig)
+
+        return img_base64
 
     def _draw_topdown_map(self, ax, data, title):
         """Draw top-down view with discoveries highlighted"""
@@ -137,9 +165,8 @@ class BenchmarkVisualizer:
         ax.plot(robot_x, robot_y, 'wo', markersize=10, markeredgewidth=2, markeredgecolor='cyan')
 
         # FOV cone
-        fov_degrees = 60
         max_range = 8.0
-        cone_angle = np.radians(fov_degrees)
+        cone_angle = np.radians(self.fov_degrees)
         left_angle = heading + cone_angle / 2
         right_angle = heading - cone_angle / 2
 
@@ -161,8 +188,12 @@ class BenchmarkVisualizer:
 
         # Title with stats
         stats = tracker.get_stats()
-        ax.set_title(f"{title}\n{stats['discovered']}/{stats['total_objects']} objects | "
-                    f"{stats['saccades']} saccades | {stats['coverage_percent']:.1f}% coverage",
+
+        # Get angular coverage from data
+        angular_coverage_pct = data.get('angular_coverage_pct', 0)
+
+        ax.set_title(f"{title}\n{stats['discovered']}/{stats['total_objects']} objects ({stats['coverage_percent']:.0f}%) | "
+                    f"{stats['saccades']} saccades | FOV Coverage: {angular_coverage_pct:.0f}%",
                     color='white', fontsize=11, fontweight='bold', pad=10)
 
         ax.set_xlim(-self.world_size/2, self.world_size/2)
@@ -272,6 +303,44 @@ Last Decision:
                bbox=dict(boxstyle='round', facecolor='#1a1a1a', alpha=0.8))
 
         ax.set_facecolor('#0a0a0a')
+
+    def _draw_glow_detail(self, ax, semantic_data):
+        """Draw detailed glow map heatmap"""
+        glow_map = semantic_data['glow_map']
+
+        im = ax.imshow(glow_map, cmap='hot', origin='lower', vmin=0, vmax=1)
+        ax.set_title('Glow Map (Predicted Interest)', color='white', fontsize=10, fontweight='bold')
+        ax.set_facecolor('#1a1a1a')
+        ax.tick_params(colors='white', labelsize=7)
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label('Intensity', color='white', fontsize=8)
+        cbar.ax.tick_params(colors='white', labelsize=7)
+
+    def _draw_attention_map(self, ax, semantic_data):
+        """Draw DINOv2 attention map from current semantic agent POV"""
+        attention_map = semantic_data.get('last_analysis', {}).get('attention_map', None)
+
+        if attention_map is not None:
+            # Attention map is 16x16 from DINOv2 patch energy
+            im = ax.imshow(attention_map, cmap='hot', origin='upper', vmin=0, vmax=1)
+            ax.set_title('DINOv2 Attention Map\n(Current Semantic POV)',
+                        color='white', fontsize=10, fontweight='bold')
+
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('Energy', color='white', fontsize=8)
+            cbar.ax.tick_params(colors='white', labelsize=7)
+        else:
+            ax.text(0.5, 0.5, 'No Attention Data', transform=ax.transAxes,
+                   ha='center', va='center', color='white', fontsize=12)
+            ax.set_title('DINOv2 Attention Map\n(Current Semantic POV)',
+                        color='white', fontsize=10, fontweight='bold')
+
+        ax.set_facecolor('#1a1a1a')
+        ax.tick_params(colors='white', labelsize=7)
+        ax.axis('off')
 
     def close(self):
         """Close the visualization"""

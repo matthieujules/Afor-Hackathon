@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantix Benchmark</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #000;
+            color: #00ff00;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 2em;
+            color: #00ff00;
+            text-shadow: 0 0 10px #00ff00;
+        }
+
+        .visualization {
+            max-width: 95vw;
+            max-height: 80vh;
+            border: 2px solid #00ff00;
+            box-shadow: 0 0 20px #00ff00;
+        }
+
+        .visualization img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 10px 20px;
+            border: 1px solid #00ff00;
+            background: #001100;
+            font-size: 1.1em;
+        }
+
+        .connected {
+            color: #00ff00;
+        }
+
+        .disconnected {
+            color: #ff0000;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .updating {
+            animation: pulse 1s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🤖 SEMANTIX BENCHMARK 🤖</h1>
+        <p>Real-time Systematic vs Semantic Curiosity Comparison</p>
+    </div>
+
+    <div class="visualization">
+        <img id="benchmark-viz" src="" alt="Benchmark Visualization">
+    </div>
+
+    <div class="status">
+        <span id="connection-status" class="disconnected">⚠️ Waiting for data...</span>
+        <button id="restart-btn" onclick="restartBenchmark()" style="margin-left: 20px; padding: 10px 20px; background: #00ff00; color: #000; border: none; font-weight: bold; cursor: pointer; font-family: 'Courier New';">
+            🔄 RESTART BENCHMARK
+        </button>
+    </div>
+
+    <script>
+        const ws = new WebSocket(`ws://${window.location.host}/ws`);
+        const statusEl = document.getElementById('connection-status');
+        const vizImg = document.getElementById('benchmark-viz');
+        let lastUpdate = Date.now();
+
+        ws.onopen = () => {
+            console.log('Connected to benchmark server');
+            statusEl.textContent = '✓ Connected - waiting for benchmark data...';
+            statusEl.className = 'connected';
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            if (data.visualization) {
+                // Update the visualization image
+                vizImg.src = `data:image/png;base64,${data.visualization}`;
+                vizImg.className = 'updating';
+
+                setTimeout(() => {
+                    vizImg.className = '';
+                }, 500);
+
+                lastUpdate = Date.now();
+                statusEl.textContent = `✓ Live - Last update: ${new Date().toLocaleTimeString()}`;
+                statusEl.className = 'connected';
+            }
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            statusEl.textContent = '⚠️ Connection error';
+            statusEl.className = 'disconnected';
+        };
+
+        ws.onclose = () => {
+            console.log('Disconnected from server');
+            statusEl.textContent = '⚠️ Disconnected';
+            statusEl.className = 'disconnected';
+        };
+
+        // Keep connection alive
+        setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send('ping');
+            }
+        }, 30000);
+
+        // Check for stale data
+        setInterval(() => {
+            if (Date.now() - lastUpdate > 10000 && vizImg.src) {
+                statusEl.textContent = '⚠️ No recent updates (benchmark may have finished)';
+                statusEl.className = 'disconnected';
+            }
+        }, 5000);
+
+        function restartBenchmark() {
+            statusEl.textContent = '🔄 Restarting benchmark...';
+            statusEl.className = 'connected';
+
+            fetch('/api/restart', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Restart triggered:', data);
+                    vizImg.src = '';
+                    setTimeout(() => {
+                        statusEl.textContent = '✓ Benchmark restarted - waiting for data...';
+                    }, 1000);
+                })
+                .catch(error => {
+                    console.error('Restart error:', error);
+                    statusEl.textContent = '⚠️ Failed to restart - please restart manually';
+                    statusEl.className = 'disconnected';
+                });
+        }
+    </script>
+</body>
+</html>
